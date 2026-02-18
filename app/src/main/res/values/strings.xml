@@ -6,5 +6,7 @@
     <string name="url_hint">Image URL (https://...)</string>
     <string name="msg_load_error">Failed to load image</string>
     <string name="permission_rationale">Storage permission is required to view local images.</string>
-    <string name="instruction">Double tap: Settings • Two fingers: Adjust Position</string>
+    <string name="instruction">Single tap: On/Off • Double tap: Settings • Two fingers: Drag</string>
+    <string name="history_title">History</string>
+    <string name="history_empty">No recent images</string>
 </resources>

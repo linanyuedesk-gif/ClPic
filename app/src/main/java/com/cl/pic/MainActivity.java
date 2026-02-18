@@ -5,24 +5,30 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.graphics.Bitmap;
+import android.graphics.Color;
 import android.graphics.Matrix;
+import android.graphics.Rect;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.util.DisplayMetrics;
 import android.util.Log;
 import android.view.GestureDetector;
+import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.Window;
 import android.view.WindowInsets;
 import android.view.WindowInsetsController;
 import android.view.WindowManager;
+import android.view.WindowMetrics;
 import android.widget.Button;
 import android.widget.EditText;
+import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ProgressBar;
+import android.widget.TextView;
 import android.widget.Toast;
 
 import androidx.activity.result.ActivityResultLauncher;
@@ -38,14 +44,25 @@ import com.bumptech.glide.request.RequestListener;
 import com.bumptech.glide.request.RequestOptions;
 import com.bumptech.glide.request.target.Target;
 
+import org.json.JSONArray;
+import org.json.JSONException;
+
+import java.util.ArrayList;
+import java.util.List;
+
 public class MainActivity extends AppCompatActivity {
 
     private static final String PREFS_NAME = "PicPrefs";
     private static final String KEY_URI = "last_image_uri";
+    private static final String KEY_HISTORY = "history_json";
     private static final String TAG = "CarPicViewer";
+    private static final int MAX_HISTORY = 10;
 
+    private FrameLayout rootLayout;
     private ImageView imageView;
+    private View blackOverlay;
     private LinearLayout configPanel;
+    private LinearLayout historyContainer;
     private EditText etUrl;
     private ProgressBar progressBar;
     
@@ -65,7 +82,6 @@ public class MainActivity extends AppCompatActivity {
                     Uri uri = result.getData().getData();
                     if (uri != null) {
                         try {
-                            // Persist permission so we can load it later
                             getContentResolver().takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION);
                         } catch (SecurityException e) {
                             Log.w(TAG, "Failed to take persistable permission: " + e.getMessage());
@@ -80,25 +96,26 @@ public class MainActivity extends AppCompatActivity {
         super.onCreate(savedInstanceState);
         requestWindowFeature(Window.FEATURE_NO_TITLE);
         
-        // Fullscreen and Keep Screen On (Important for Car/Digital Frame usage)
         getWindow().setFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN, WindowManager.LayoutParams.FLAG_FULLSCREEN);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         
         setContentView(R.layout.activity_main);
         
+        rootLayout = findViewById(R.id.rootLayout);
         imageView = findViewById(R.id.imageView);
+        blackOverlay = findViewById(R.id.blackOverlay);
         configPanel = findViewById(R.id.configPanel);
+        historyContainer = findViewById(R.id.historyContainer);
         etUrl = findViewById(R.id.etUrl);
         progressBar = findViewById(R.id.loading);
+        
         Button btnLocal = findViewById(R.id.btnSelectLocal);
         Button btnUrl = findViewById(R.id.btnLoadUrl);
         
         updateScreenDimensions();
-
         setupGestures();
         hideSystemUI();
 
-        // No runtime permissions needed for ACTION_OPEN_DOCUMENT
         btnLocal.setOnClickListener(v -> openFilePicker());
         
         btnUrl.setOnClickListener(v -> {
@@ -106,7 +123,6 @@ public class MainActivity extends AppCompatActivity {
             if(!url.isEmpty()) saveAndLoad(url);
         });
 
-        // Load Last Image
         SharedPreferences prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
         String last = prefs.getString(KEY_URI, null);
         if (last != null) loadImage(last);
@@ -120,9 +136,17 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void updateScreenDimensions() {
-        DisplayMetrics metrics = getResources().getDisplayMetrics();
-        screenWidth = metrics.widthPixels;
-        screenHeight = metrics.heightPixels;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            WindowMetrics metrics = getWindowManager().getCurrentWindowMetrics();
+            Rect bounds = metrics.getBounds();
+            screenWidth = bounds.width();
+            screenHeight = bounds.height();
+        } else {
+            DisplayMetrics metrics = new DisplayMetrics();
+            getWindowManager().getDefaultDisplay().getRealMetrics(metrics);
+            screenWidth = metrics.widthPixels;
+            screenHeight = metrics.heightPixels;
+        }
     }
 
     @Override
@@ -134,8 +158,6 @@ public class MainActivity extends AppCompatActivity {
     }
     
     private void hideSystemUI() {
-        // Use legacy flags for wider compatibility on car head units, 
-        // while also attempting modern API for newer Android versions.
         int flags = View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
                 | View.SYSTEM_UI_FLAG_LAYOUT_STABLE
                 | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
@@ -163,40 +185,53 @@ public class MainActivity extends AppCompatActivity {
                 toggleConfig();
                 return true;
             }
+
+            @Override
+            public boolean onSingleTapConfirmed(@NonNull MotionEvent e) {
+                if (configPanel.getVisibility() == View.VISIBLE) {
+                    toggleConfig(); // Close config if open
+                } else {
+                    toggleBlackScreen(); // Toggle black screen otherwise
+                }
+                return true;
+            }
         });
 
-        imageView.setOnTouchListener((v, event) -> {
+        // Attach listener to rootLayout so it works even if ImageView is empty or hidden
+        rootLayout.setOnTouchListener((v, event) -> {
             gestureDetector.onTouchEvent(event);
             
-            switch (event.getActionMasked()) {
-                case MotionEvent.ACTION_DOWN:
-                case MotionEvent.ACTION_POINTER_DOWN:
-                    if (event.getPointerCount() == 2) {
-                        isTwoFingerDrag = true;
-                        lastTouchY = (event.getY(0) + event.getY(1)) / 2;
-                    } else {
-                        isTwoFingerDrag = false;
-                    }
-                    break;
-                case MotionEvent.ACTION_MOVE:
-                    if (isTwoFingerDrag && event.getPointerCount() == 2) {
-                        float avgY = (event.getY(0) + event.getY(1)) / 2;
-                        float dy = avgY - lastTouchY;
-                        updatePosition(dy);
-                        lastTouchY = avgY;
-                    }
-                    break;
-                case MotionEvent.ACTION_UP:
-                case MotionEvent.ACTION_POINTER_UP:
-                    if (event.getPointerCount() < 2) isTwoFingerDrag = false;
-                    break;
+            // Only allow drag if screen is NOT blacked out
+            if (blackOverlay.getVisibility() != View.VISIBLE) {
+                switch (event.getActionMasked()) {
+                    case MotionEvent.ACTION_DOWN:
+                    case MotionEvent.ACTION_POINTER_DOWN:
+                        if (event.getPointerCount() == 2) {
+                            isTwoFingerDrag = true;
+                            lastTouchY = (event.getY(0) + event.getY(1)) / 2;
+                        } else {
+                            isTwoFingerDrag = false;
+                        }
+                        break;
+                    case MotionEvent.ACTION_MOVE:
+                        if (isTwoFingerDrag && event.getPointerCount() == 2) {
+                            float avgY = (event.getY(0) + event.getY(1)) / 2;
+                            float dy = avgY - lastTouchY;
+                            updatePosition(dy);
+                            lastTouchY = avgY;
+                        }
+                        break;
+                    case MotionEvent.ACTION_UP:
+                    case MotionEvent.ACTION_POINTER_UP:
+                        if (event.getPointerCount() < 2) isTwoFingerDrag = false;
+                        break;
+                }
             }
             return true;
         });
     }
 
     private void updatePosition(float dy) {
-        // Prevent matrix operations if image isn't loaded or invalid dimensions
         if (currentImageHeight <= 0 || screenHeight <= 0) return;
 
         float[] values = new float[9];
@@ -207,19 +242,14 @@ public class MainActivity extends AppCompatActivity {
         float minTransY, maxTransY;
 
         if (currentImageHeight <= screenHeight) {
-            // Image is smaller than screen, keep it centered
             float offset = (screenHeight - currentImageHeight) / 2f;
             minTransY = offset;
             maxTransY = offset;
         } else {
-            // Image is taller than screen
-            // Top align: 0
-            // Bottom align: (screenHeight - currentImageHeight)
             minTransY = screenHeight - currentImageHeight;
             maxTransY = 0;
         }
 
-        // Clamp
         if (newTransY > maxTransY) newTransY = maxTransY;
         if (newTransY < minTransY) newTransY = minTransY;
 
@@ -228,11 +258,23 @@ public class MainActivity extends AppCompatActivity {
         imageView.setImageMatrix(currentMatrix);
     }
 
+    private void toggleBlackScreen() {
+        if (blackOverlay.getVisibility() == View.VISIBLE) {
+            blackOverlay.setVisibility(View.GONE);
+        } else {
+            blackOverlay.setVisibility(View.VISIBLE);
+        }
+        hideSystemUI();
+    }
+
     private void toggleConfig() {
         if (configPanel.getVisibility() == View.VISIBLE) {
             configPanel.setVisibility(View.GONE);
             hideSystemUI();
         } else {
+            // Ensure black overlay is off when opening config
+            blackOverlay.setVisibility(View.GONE);
+            refreshHistoryUI();
             configPanel.setVisibility(View.VISIBLE);
         }
     }
@@ -245,10 +287,111 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void saveAndLoad(String uri) {
-        getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit().putString(KEY_URI, uri).apply();
+        // Save current URI
+        getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .edit()
+                .putString(KEY_URI, uri)
+                .apply();
+        
+        // Add to history
+        addToHistory(uri);
+        
         loadImage(uri);
         configPanel.setVisibility(View.GONE);
         hideSystemUI();
+    }
+
+    private void addToHistory(String uri) {
+        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+        String jsonString = prefs.getString(KEY_HISTORY, "[]");
+        List<String> list = new ArrayList<>();
+        
+        try {
+            JSONArray jsonArray = new JSONArray(jsonString);
+            for (int i = 0; i < jsonArray.length(); i++) {
+                String item = jsonArray.getString(i);
+                if (!item.equals(uri)) { // Remove duplicates (will add to top later)
+                    list.add(item);
+                }
+            }
+        } catch (JSONException e) {
+            e.printStackTrace();
+        }
+
+        // Add to top
+        list.add(0, uri);
+        
+        // Limit size
+        if (list.size() > MAX_HISTORY) {
+            list = list.subList(0, MAX_HISTORY);
+        }
+
+        // Save back
+        JSONArray newArray = new JSONArray(list);
+        prefs.edit().putString(KEY_HISTORY, newArray.toString()).apply();
+    }
+
+    private void refreshHistoryUI() {
+        historyContainer.removeAllViews();
+        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+        String jsonString = prefs.getString(KEY_HISTORY, "[]");
+
+        try {
+            JSONArray jsonArray = new JSONArray(jsonString);
+            if (jsonArray.length() == 0) {
+                TextView empty = new TextView(this);
+                empty.setText(R.string.history_empty);
+                empty.setTextColor(Color.GRAY);
+                empty.setPadding(0, 20, 0, 20);
+                empty.setGravity(Gravity.CENTER);
+                historyContainer.addView(empty);
+                return;
+            }
+
+            for (int i = 0; i < jsonArray.length(); i++) {
+                final String uri = jsonArray.getString(i);
+                
+                // Format display text (filename or short url)
+                String displayText = uri;
+                try {
+                    Uri u = Uri.parse(uri);
+                    if (u.getScheme() != null && u.getScheme().startsWith("content")) {
+                        // Try to get last segment for content URIs
+                        String path = u.getLastPathSegment();
+                        if (path != null) {
+                            // Clean up standard Android file picker IDs like "image:1234"
+                            int split = path.lastIndexOf(':');
+                            if (split > -1) path = path.substring(split + 1);
+                            displayText = "Local Image: ..." + path;
+                        }
+                    } 
+                } catch (Exception ignored) {}
+
+                TextView tv = new TextView(this);
+                tv.setText(displayText);
+                tv.setTextColor(Color.WHITE);
+                tv.setTextSize(14f);
+                tv.setPadding(16, 24, 16, 24);
+                tv.setBackgroundResource(android.R.drawable.list_selector_background);
+                tv.setMaxLines(1);
+                tv.setEllipsize(android.text.TextUtils.TruncateAt.MIDDLE);
+                
+                tv.setOnClickListener(v -> saveAndLoad(uri));
+                
+                historyContainer.addView(tv);
+                
+                // Divider
+                if (i < jsonArray.length() - 1) {
+                    View divider = new View(this);
+                    divider.setLayoutParams(new LinearLayout.LayoutParams(
+                            LinearLayout.LayoutParams.MATCH_PARENT, 1));
+                    divider.setBackgroundColor(Color.parseColor("#44FFFFFF"));
+                    historyContainer.addView(divider);
+                }
+            }
+        } catch (JSONException e) {
+            e.printStackTrace();
+        }
     }
 
     private void loadImage(String uriString) {
@@ -256,13 +399,10 @@ public class MainActivity extends AppCompatActivity {
         
         progressBar.setVisibility(View.VISIBLE);
         
-        // Setup options: Timeout and Size limit to prevent OOM
-        // Reduced to 2048 to prevent crashes on car head units with limited VRAM/RAM
         RequestOptions options = new RequestOptions()
                 .timeout(30000) 
                 .override(2048, 2048); 
 
-        // Use Uri.parse to handle both content:// and http:// correctly
         Uri uri = Uri.parse(uriString);
 
         Glide.with(this)
@@ -281,12 +421,9 @@ public class MainActivity extends AppCompatActivity {
                 @Override
                 public boolean onResourceReady(Bitmap resource, Object model, Target<Bitmap> target, DataSource dataSource, boolean isFirstResource) {
                     progressBar.setVisibility(View.GONE);
-                    // Manually render logic to setup Matrix
                     if (resource != null) {
                         renderImage(resource);
                     }
-                    // Return true to tell Glide "I handled setting the resource", preventing it 
-                    // from resetting the ImageView's state/matrix with a standard setImageBitmap call
                     return true; 
                 }
             })
@@ -299,24 +436,21 @@ public class MainActivity extends AppCompatActivity {
         
         if (imgW == 0 || imgH == 0) return;
 
-        // Ensure we have valid screen dimensions
         if (screenWidth == 0 || screenHeight == 0) {
             updateScreenDimensions();
         }
 
-        // Scale to fit width
         float scale = (float) screenWidth / imgW;
         currentMatrix.reset();
         currentMatrix.setScale(scale, scale);
         
         currentImageHeight = imgH * scale;
         
-        // Reset to top or center initially
         float transY = 0;
         if (currentImageHeight < screenHeight) {
             transY = (screenHeight - currentImageHeight) / 2f;
         } else {
-            transY = 0; // Top align
+            transY = 0; 
         }
         currentMatrix.postTranslate(0, transY);
         
