@@ -75,6 +75,7 @@ public class MainActivity extends AppCompatActivity {
     private int screenHeight;
     private float currentImageHeight = 0f;
     private Matrix currentMatrix = new Matrix();
+    private String currentUriString;
 
     private final ActivityResultLauncher<Intent> filePickerLauncher =
             registerForActivityResult(new ActivityResultContracts.StartActivityForResult(), result -> {
@@ -125,7 +126,10 @@ public class MainActivity extends AppCompatActivity {
 
         SharedPreferences prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
         String last = prefs.getString(KEY_URI, null);
-        if (last != null) loadImage(last);
+        if (last != null) {
+            currentUriString = last;
+            loadImage(last);
+        }
     }
     
     @Override
@@ -221,9 +225,18 @@ public class MainActivity extends AppCompatActivity {
                             lastTouchY = avgY;
                         }
                         break;
-                    case MotionEvent.ACTION_UP:
                     case MotionEvent.ACTION_POINTER_UP:
-                        if (event.getPointerCount() < 2) isTwoFingerDrag = false;
+                        if (isTwoFingerDrag) {
+                            savePosition();
+                            isTwoFingerDrag = false;
+                        }
+                        break;
+                    case MotionEvent.ACTION_UP:
+                    case MotionEvent.ACTION_CANCEL:
+                        if (isTwoFingerDrag) {
+                            savePosition();
+                            isTwoFingerDrag = false;
+                        }
                         break;
                 }
             }
@@ -258,6 +271,19 @@ public class MainActivity extends AppCompatActivity {
         imageView.setImageMatrix(currentMatrix);
     }
 
+    private void savePosition() {
+        if (currentUriString == null) return;
+        
+        float[] values = new float[9];
+        currentMatrix.getValues(values);
+        float y = values[Matrix.MTRANS_Y];
+        
+        getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putFloat("pos_" + currentUriString, y)
+            .apply();
+    }
+
     private void toggleBlackScreen() {
         if (blackOverlay.getVisibility() == View.VISIBLE) {
             blackOverlay.setVisibility(View.GONE);
@@ -288,6 +314,7 @@ public class MainActivity extends AppCompatActivity {
 
     private void saveAndLoad(String uri) {
         // Save current URI
+        currentUriString = uri;
         getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                 .edit()
                 .putString(KEY_URI, uri)
@@ -447,11 +474,39 @@ public class MainActivity extends AppCompatActivity {
         currentImageHeight = imgH * scale;
         
         float transY = 0;
-        if (currentImageHeight < screenHeight) {
-            transY = (screenHeight - currentImageHeight) / 2f;
+        
+        float minTransY, maxTransY;
+        if (currentImageHeight <= screenHeight) {
+            float offset = (screenHeight - currentImageHeight) / 2f;
+            minTransY = offset;
+            maxTransY = offset;
         } else {
-            transY = 0; 
+            minTransY = screenHeight - currentImageHeight;
+            maxTransY = 0;
         }
+
+        // Check for saved position
+        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+        String key = "pos_" + currentUriString;
+        
+        boolean restored = false;
+        if (currentUriString != null && prefs.contains(key)) {
+            transY = prefs.getFloat(key, 0f);
+            
+            // Validate bounds (in case screen size changed or image changed)
+            if (transY > maxTransY) transY = maxTransY;
+            if (transY < minTransY) transY = minTransY;
+            restored = true;
+        }
+
+        if (!restored) {
+            if (currentImageHeight < screenHeight) {
+                transY = (screenHeight - currentImageHeight) / 2f;
+            } else {
+                transY = 0; 
+            }
+        }
+        
         currentMatrix.postTranslate(0, transY);
         
         imageView.setImageMatrix(currentMatrix);
