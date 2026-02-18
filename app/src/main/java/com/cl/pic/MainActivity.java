@@ -48,12 +48,12 @@ public class MainActivity extends AppCompatActivity {
     private GestureDetector gestureDetector;
     private float lastTouchY;
     private boolean isTwoFingerDrag = false;
-    private float currentTranslationY = 0;
     
     // Geometry State
     private int screenWidth;
     private int screenHeight;
     private float currentImageHeight;
+    private Matrix currentMatrix = new Matrix();
 
     private final ActivityResultLauncher<String> requestPermissionLauncher =
             registerForActivityResult(new ActivityResultContracts.RequestPermission(), isGranted -> {
@@ -163,28 +163,33 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void updatePosition(float dy) {
-        currentTranslationY += dy;
+        float[] values = new float[9];
+        currentMatrix.getValues(values);
+        float transY = values[Matrix.MTRANS_Y];
         
-        float minTranslation, maxTranslation;
+        float newTransY = transY + dy;
+        float minTransY, maxTransY;
 
         if (currentImageHeight <= screenHeight) {
             // Image is smaller than screen, keep it centered
             float offset = (screenHeight - currentImageHeight) / 2f;
-            minTranslation = offset;
-            maxTranslation = offset;
+            minTransY = offset;
+            maxTransY = offset;
         } else {
             // Image is taller than screen
             // Top align: 0
-            // Bottom align: -(currentImageHeight - screenHeight)
-            minTranslation = -(currentImageHeight - screenHeight);
-            maxTranslation = 0;
+            // Bottom align: (screenHeight - currentImageHeight)
+            minTransY = screenHeight - currentImageHeight;
+            maxTransY = 0;
         }
 
         // Clamp
-        if (currentTranslationY > maxTranslation) currentTranslationY = maxTranslation;
-        if (currentTranslationY < minTranslation) currentTranslationY = minTranslation;
+        if (newTransY > maxTransY) newTransY = maxTransY;
+        if (newTransY < minTransY) newTransY = minTransY;
 
-        imageView.setTranslationY(currentTranslationY);
+        values[Matrix.MTRANS_Y] = newTransY;
+        currentMatrix.setValues(values);
+        imageView.setImageMatrix(currentMatrix);
     }
 
     private void toggleConfig() {
@@ -257,20 +262,21 @@ public class MainActivity extends AppCompatActivity {
 
         // Scale to fit width
         float scale = (float) screenWidth / imgW;
-        Matrix matrix = new Matrix();
-        matrix.setScale(scale, scale);
-        
-        imageView.setImageMatrix(matrix);
-        imageView.setImageBitmap(bitmap);
+        currentMatrix.reset();
+        currentMatrix.setScale(scale, scale);
         
         currentImageHeight = imgH * scale;
         
         // Reset to top or center initially
+        float transY = 0;
         if (currentImageHeight < screenHeight) {
-            currentTranslationY = (screenHeight - currentImageHeight) / 2f;
+            transY = (screenHeight - currentImageHeight) / 2f;
         } else {
-            currentTranslationY = 0; // Top align
+            transY = 0; // Top align
         }
-        imageView.setTranslationY(currentTranslationY);
+        currentMatrix.postTranslate(0, transY);
+        
+        imageView.setImageMatrix(currentMatrix);
+        imageView.setImageBitmap(bitmap);
     }
 }
