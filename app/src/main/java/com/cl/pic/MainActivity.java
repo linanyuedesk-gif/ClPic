@@ -9,6 +9,7 @@ import android.graphics.Matrix;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.util.DisplayMetrics;
 import android.util.Log;
 import android.view.GestureDetector;
 import android.view.MotionEvent;
@@ -55,7 +56,7 @@ public class MainActivity extends AppCompatActivity {
     // Geometry State
     private int screenWidth;
     private int screenHeight;
-    private float currentImageHeight;
+    private float currentImageHeight = 0f;
     private Matrix currentMatrix = new Matrix();
 
     private final ActivityResultLauncher<Intent> filePickerLauncher =
@@ -78,7 +79,10 @@ public class MainActivity extends AppCompatActivity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         requestWindowFeature(Window.FEATURE_NO_TITLE);
+        
+        // Fullscreen and Keep Screen On (Important for Car/Digital Frame usage)
         getWindow().setFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN, WindowManager.LayoutParams.FLAG_FULLSCREEN);
+        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         
         setContentView(R.layout.activity_main);
         
@@ -89,8 +93,7 @@ public class MainActivity extends AppCompatActivity {
         Button btnLocal = findViewById(R.id.btnSelectLocal);
         Button btnUrl = findViewById(R.id.btnLoadUrl);
         
-        screenWidth = getResources().getDisplayMetrics().widthPixels;
-        screenHeight = getResources().getDisplayMetrics().heightPixels;
+        updateScreenDimensions();
 
         setupGestures();
         hideSystemUI();
@@ -113,6 +116,13 @@ public class MainActivity extends AppCompatActivity {
     protected void onResume() {
         super.onResume();
         hideSystemUI();
+        updateScreenDimensions();
+    }
+
+    private void updateScreenDimensions() {
+        DisplayMetrics metrics = getResources().getDisplayMetrics();
+        screenWidth = metrics.widthPixels;
+        screenHeight = metrics.heightPixels;
     }
 
     @Override
@@ -124,6 +134,17 @@ public class MainActivity extends AppCompatActivity {
     }
     
     private void hideSystemUI() {
+        // Use legacy flags for wider compatibility on car head units, 
+        // while also attempting modern API for newer Android versions.
+        int flags = View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                | View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                | View.SYSTEM_UI_FLAG_FULLSCREEN;
+        
+        getWindow().getDecorView().setSystemUiVisibility(flags);
+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             final Window window = getWindow();
             window.setDecorFitsSystemWindows(false);
@@ -132,14 +153,6 @@ public class MainActivity extends AppCompatActivity {
                 controller.hide(WindowInsets.Type.statusBars() | WindowInsets.Type.navigationBars());
                 controller.setSystemBarsBehavior(WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
             }
-        } else {
-            getWindow().getDecorView().setSystemUiVisibility(
-                    View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
-                    | View.SYSTEM_UI_FLAG_LAYOUT_STABLE
-                    | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
-                    | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
-                    | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
-                    | View.SYSTEM_UI_FLAG_FULLSCREEN);
         }
     }
 
@@ -183,6 +196,9 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void updatePosition(float dy) {
+        // Prevent matrix operations if image isn't loaded or invalid dimensions
+        if (currentImageHeight <= 0 || screenHeight <= 0) return;
+
         float[] values = new float[9];
         currentMatrix.getValues(values);
         float transY = values[Matrix.MTRANS_Y];
@@ -241,9 +257,10 @@ public class MainActivity extends AppCompatActivity {
         progressBar.setVisibility(View.VISIBLE);
         
         // Setup options: Timeout and Size limit to prevent OOM
+        // Reduced to 2048 to prevent crashes on car head units with limited VRAM/RAM
         RequestOptions options = new RequestOptions()
-                .timeout(30000) // 30 seconds timeout
-                .override(4096, 4096); // Limit max resolution to 4k to save memory
+                .timeout(30000) 
+                .override(2048, 2048); 
 
         // Use Uri.parse to handle both content:// and http:// correctly
         Uri uri = Uri.parse(uriString);
@@ -265,7 +282,9 @@ public class MainActivity extends AppCompatActivity {
                 public boolean onResourceReady(Bitmap resource, Object model, Target<Bitmap> target, DataSource dataSource, boolean isFirstResource) {
                     progressBar.setVisibility(View.GONE);
                     // Manually render logic to setup Matrix
-                    renderImage(resource);
+                    if (resource != null) {
+                        renderImage(resource);
+                    }
                     // Return true to tell Glide "I handled setting the resource", preventing it 
                     // from resetting the ImageView's state/matrix with a standard setImageBitmap call
                     return true; 
@@ -278,12 +297,12 @@ public class MainActivity extends AppCompatActivity {
         int imgW = bitmap.getWidth();
         int imgH = bitmap.getHeight();
         
-        // Update dimensions in case screen rotated or changed
-        screenWidth = imageView.getWidth();
-        screenHeight = imageView.getHeight();
-        
-        if (screenWidth == 0) screenWidth = getResources().getDisplayMetrics().widthPixels;
-        if (screenHeight == 0) screenHeight = getResources().getDisplayMetrics().heightPixels;
+        if (imgW == 0 || imgH == 0) return;
+
+        // Ensure we have valid screen dimensions
+        if (screenWidth == 0 || screenHeight == 0) {
+            updateScreenDimensions();
+        }
 
         // Scale to fit width
         float scale = (float) screenWidth / imgW;

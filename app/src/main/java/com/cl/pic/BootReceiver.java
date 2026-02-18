@@ -1,0 +1,21 @@
+package com.cl.pic;
+
+import android.content.BroadcastReceiver;
+import android.content.Context;
+import android.content.Intent;
+import android.util.Log;
+
+public class BootReceiver extends BroadcastReceiver {
+    private static final String TAG = "CarPicBoot";
+
+    @Override
+    public void onReceive(Context context, Intent intent) {
+        if (Intent.ACTION_BOOT_COMPLETED.equals(intent.getAction())) {
+            Log.d(TAG, "Boot completed received, starting application...");
+            Intent i = new Intent(context, MainActivity.class);
+            // Flag is required when starting activity from a Receiver context
+            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK); 
+            context.startActivity(i);
+        }
+    }
+}
