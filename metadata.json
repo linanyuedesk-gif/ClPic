@@ -1,0 +1,5 @@
+{
+  "name": "全屏图片",
+  "description": "A full-screen image viewer for car head units, supporting local files and URLs with gesture controls.",
+  "requestFramePermissions": []
+}

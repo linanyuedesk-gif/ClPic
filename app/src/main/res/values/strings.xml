@@ -1,0 +1,10 @@
+<resources>
+    <string name="app_name">Car Pic Viewer</string>
+    <string name="config_title">Configuration</string>
+    <string name="btn_local">Select Local Image</string>
+    <string name="btn_url">Load URL</string>
+    <string name="url_hint">Image URL (https://...)</string>
+    <string name="msg_load_error">Failed to load image</string>
+    <string name="permission_rationale">Storage permission is required to view local images.</string>
+    <string name="instruction">Double tap: Settings • Two fingers: Adjust Position</string>
+</resources>
