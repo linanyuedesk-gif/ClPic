@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Background: Rounded Square with Deep Blue-Grey Gradient -->
+    <path android:pathData="M14,0 L94,0 A14,14 0 0 1 108,14 L108,94 A14,14 0 0 1 94,108 L14,108 A14,14 0 0 1 0,94 L0,14 A14,14 0 0 1 14,0 z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:endX="108"
+                android:endY="108"
+                android:startX="0"
+                android:startY="0"
+                android:type="linear">
+                <item android:color="#FF37474F" android:offset="0.0" />
+                <item android:color="#FF263238" android:offset="1.0" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Foreground: Minimalist Landscape Icon -->
+    <group
+        android:pivotX="54"
+        android:pivotY="54"
+        android:scaleX="0.65"
+        android:scaleY="0.65">
+        
+        <!-- Frame -->
+        <path
+            android:pathData="M18,18 L90,18 A4,4 0 0 1 94,22 L94,86 A4,4 0 0 1 90,90 L18,90 A4,4 0 0 1 14,86 L14,22 A4,4 0 0 1 18,18 z"
+            android:strokeWidth="6"
+            android:strokeColor="#FFFFFF"
+            android:strokeLineJoin="round"
+            android:fillColor="#00000000"/>
+
+        <!-- Sun -->
+        <path
+            android:pathData="M72,38m-6,0a6,6 0 1,1 12,0a6,6 0 1,1 -12,0"
+            android:fillColor="#FFC107"/>
+            
+        <!-- Mountains -->
+        <path
+            android:pathData="M14,88 L38,54 L52,70 L64,52 L94,88 Z"
+            android:fillColor="#FFFFFF"/>
+    </group>
+</vector>

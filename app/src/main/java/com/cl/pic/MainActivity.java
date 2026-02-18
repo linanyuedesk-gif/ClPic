@@ -12,10 +12,13 @@ import android.graphics.drawable.Drawable;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.util.Log;
 import android.view.GestureDetector;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.Window;
+import android.view.WindowInsets;
+import android.view.WindowInsetsController;
 import android.view.WindowManager;
 import android.widget.Button;
 import android.widget.EditText;
@@ -32,6 +35,7 @@ import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.content.ContextCompat;
 
 import com.bumptech.glide.Glide;
+import com.bumptech.glide.request.RequestOptions;
 import com.bumptech.glide.request.target.CustomTarget;
 import com.bumptech.glide.request.transition.Transition;
 
@@ -39,6 +43,7 @@ public class MainActivity extends AppCompatActivity {
 
     private static final String PREFS_NAME = "PicPrefs";
     private static final String KEY_URI = "last_image_uri";
+    private static final String TAG = "CarPicViewer";
 
     private ImageView imageView;
     private LinearLayout configPanel;
@@ -79,7 +84,6 @@ public class MainActivity extends AppCompatActivity {
         super.onCreate(savedInstanceState);
         requestWindowFeature(Window.FEATURE_NO_TITLE);
         getWindow().setFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN, WindowManager.LayoutParams.FLAG_FULLSCREEN);
-        hideSystemUI();
         
         setContentView(R.layout.activity_main);
         
@@ -94,6 +98,7 @@ public class MainActivity extends AppCompatActivity {
         screenHeight = getResources().getDisplayMetrics().heightPixels;
 
         setupGestures();
+        hideSystemUI();
 
         btnLocal.setOnClickListener(v -> checkPermission());
         btnUrl.setOnClickListener(v -> {
@@ -112,15 +117,33 @@ public class MainActivity extends AppCompatActivity {
         super.onResume();
         hideSystemUI();
     }
+
+    @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (hasFocus) {
+            hideSystemUI();
+        }
+    }
     
     private void hideSystemUI() {
-        getWindow().getDecorView().setSystemUiVisibility(
-                View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
-                | View.SYSTEM_UI_FLAG_LAYOUT_STABLE
-                | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
-                | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
-                | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
-                | View.SYSTEM_UI_FLAG_FULLSCREEN);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            final Window window = getWindow();
+            window.setDecorFitsSystemWindows(false);
+            WindowInsetsController controller = window.getInsetsController();
+            if (controller != null) {
+                controller.hide(WindowInsets.Type.statusBars() | WindowInsets.Type.navigationBars());
+                controller.setSystemBarsBehavior(WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+            }
+        } else {
+            getWindow().getDecorView().setSystemUiVisibility(
+                    View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                    | View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                    | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                    | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                    | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                    | View.SYSTEM_UI_FLAG_FULLSCREEN);
+        }
     }
 
     private void setupGestures() {
@@ -233,20 +256,31 @@ public class MainActivity extends AppCompatActivity {
 
     private void loadImage(String uri) {
         progressBar.setVisibility(View.VISIBLE);
-        Glide.with(this).asBitmap().load(uri).into(new CustomTarget<Bitmap>() {
-            @Override
-            public void onResourceReady(@NonNull Bitmap resource, @Nullable Transition<? super Bitmap> transition) {
-                progressBar.setVisibility(View.GONE);
-                renderImage(resource);
-            }
-            @Override
-            public void onLoadCleared(@Nullable Drawable placeholder) {}
-            @Override
-            public void onLoadFailed(@Nullable Drawable errorDrawable) {
-                progressBar.setVisibility(View.GONE);
-                Toast.makeText(MainActivity.this, R.string.msg_load_error, Toast.LENGTH_SHORT).show();
-            }
-        });
+        
+        // Setup options: Timeout and Size limit to prevent OOM
+        RequestOptions options = new RequestOptions()
+                .timeout(30000) // 30 seconds timeout
+                .override(4096, 4096); // Limit max resolution to 4k to save memory
+
+        Glide.with(this)
+            .asBitmap()
+            .load(uri)
+            .apply(options)
+            .into(new CustomTarget<Bitmap>() {
+                @Override
+                public void onResourceReady(@NonNull Bitmap resource, @Nullable Transition<? super Bitmap> transition) {
+                    progressBar.setVisibility(View.GONE);
+                    renderImage(resource);
+                }
+                @Override
+                public void onLoadCleared(@Nullable Drawable placeholder) {}
+                @Override
+                public void onLoadFailed(@Nullable Drawable errorDrawable) {
+                    progressBar.setVisibility(View.GONE);
+                    Log.e(TAG, "Failed to load image: " + uri);
+                    Toast.makeText(MainActivity.this, R.string.msg_load_error, Toast.LENGTH_LONG).show();
+                }
+            });
     }
 
     private void renderImage(Bitmap bitmap) {
