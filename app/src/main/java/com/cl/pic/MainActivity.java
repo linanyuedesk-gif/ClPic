@@ -1,14 +1,11 @@
 package com.cl.pic;
 
-import android.Manifest;
 import android.app.Activity;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
-import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
 import android.graphics.Matrix;
-import android.graphics.drawable.Drawable;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -32,12 +29,13 @@ import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.appcompat.app.AppCompatActivity;
-import androidx.core.content.ContextCompat;
 
 import com.bumptech.glide.Glide;
+import com.bumptech.glide.load.DataSource;
+import com.bumptech.glide.load.engine.GlideException;
+import com.bumptech.glide.request.RequestListener;
 import com.bumptech.glide.request.RequestOptions;
-import com.bumptech.glide.request.target.CustomTarget;
-import com.bumptech.glide.request.transition.Transition;
+import com.bumptech.glide.request.target.Target;
 
 public class MainActivity extends AppCompatActivity {
 
@@ -60,20 +58,17 @@ public class MainActivity extends AppCompatActivity {
     private float currentImageHeight;
     private Matrix currentMatrix = new Matrix();
 
-    private final ActivityResultLauncher<String> requestPermissionLauncher =
-            registerForActivityResult(new ActivityResultContracts.RequestPermission(), isGranted -> {
-                if (isGranted) openFilePicker();
-                else Toast.makeText(this, R.string.permission_rationale, Toast.LENGTH_LONG).show();
-            });
-
     private final ActivityResultLauncher<Intent> filePickerLauncher =
             registerForActivityResult(new ActivityResultContracts.StartActivityForResult(), result -> {
                 if (result.getResultCode() == Activity.RESULT_OK && result.getData() != null) {
                     Uri uri = result.getData().getData();
                     if (uri != null) {
                         try {
+                            // Persist permission so we can load it later
                             getContentResolver().takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION);
-                        } catch (SecurityException e) { e.printStackTrace(); }
+                        } catch (SecurityException e) {
+                            Log.w(TAG, "Failed to take persistable permission: " + e.getMessage());
+                        }
                         saveAndLoad(uri.toString());
                     }
                 }
@@ -100,7 +95,9 @@ public class MainActivity extends AppCompatActivity {
         setupGestures();
         hideSystemUI();
 
-        btnLocal.setOnClickListener(v -> checkPermission());
+        // No runtime permissions needed for ACTION_OPEN_DOCUMENT
+        btnLocal.setOnClickListener(v -> openFilePicker());
+        
         btnUrl.setOnClickListener(v -> {
             String url = etUrl.getText().toString().trim();
             if(!url.isEmpty()) saveAndLoad(url);
@@ -224,22 +221,6 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    private void checkPermission() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_MEDIA_IMAGES) != PackageManager.PERMISSION_GRANTED) {
-                requestPermissionLauncher.launch(Manifest.permission.READ_MEDIA_IMAGES);
-            } else {
-                openFilePicker();
-            }
-        } else {
-            if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED) {
-                requestPermissionLauncher.launch(Manifest.permission.READ_EXTERNAL_STORAGE);
-            } else {
-                openFilePicker();
-            }
-        }
-    }
-
     private void openFilePicker() {
         Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
         intent.addCategory(Intent.CATEGORY_OPENABLE);
@@ -254,7 +235,9 @@ public class MainActivity extends AppCompatActivity {
         hideSystemUI();
     }
 
-    private void loadImage(String uri) {
+    private void loadImage(String uriString) {
+        if (uriString == null || uriString.isEmpty()) return;
+        
         progressBar.setVisibility(View.VISIBLE);
         
         // Setup options: Timeout and Size limit to prevent OOM
@@ -262,25 +245,33 @@ public class MainActivity extends AppCompatActivity {
                 .timeout(30000) // 30 seconds timeout
                 .override(4096, 4096); // Limit max resolution to 4k to save memory
 
+        // Use Uri.parse to handle both content:// and http:// correctly
+        Uri uri = Uri.parse(uriString);
+
         Glide.with(this)
             .asBitmap()
             .load(uri)
             .apply(options)
-            .into(new CustomTarget<Bitmap>() {
+            .listener(new RequestListener<Bitmap>() {
                 @Override
-                public void onResourceReady(@NonNull Bitmap resource, @Nullable Transition<? super Bitmap> transition) {
+                public boolean onLoadFailed(@Nullable GlideException e, Object model, Target<Bitmap> target, boolean isFirstResource) {
                     progressBar.setVisibility(View.GONE);
-                    renderImage(resource);
-                }
-                @Override
-                public void onLoadCleared(@Nullable Drawable placeholder) {}
-                @Override
-                public void onLoadFailed(@Nullable Drawable errorDrawable) {
-                    progressBar.setVisibility(View.GONE);
-                    Log.e(TAG, "Failed to load image: " + uri);
+                    Log.e(TAG, "Failed to load image: " + uriString, e);
                     Toast.makeText(MainActivity.this, R.string.msg_load_error, Toast.LENGTH_LONG).show();
+                    return false;
                 }
-            });
+
+                @Override
+                public boolean onResourceReady(Bitmap resource, Object model, Target<Bitmap> target, DataSource dataSource, boolean isFirstResource) {
+                    progressBar.setVisibility(View.GONE);
+                    // Manually render logic to setup Matrix
+                    renderImage(resource);
+                    // Return true to tell Glide "I handled setting the resource", preventing it 
+                    // from resetting the ImageView's state/matrix with a standard setImageBitmap call
+                    return true; 
+                }
+            })
+            .into(imageView);
     }
 
     private void renderImage(Bitmap bitmap) {
