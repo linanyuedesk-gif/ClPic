@@ -1,5 +1,5 @@
 {
   "name": "全屏图片",
-  "description": "A full-screen image viewer for car head units, supporting local files and URLs with gesture controls.",
+  "description": "A full-screen image viewer for car head units. Features: 1-finger brightness control (with ultra-dim mode), 3-finger swipe for image switching, device scanning for local images, and auto-start on boot.",
   "requestFramePermissions": []
 }
