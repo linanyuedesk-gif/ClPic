@@ -9,4 +9,9 @@
     <string name="instruction">Single tap: On/Off • Double tap: Settings • Two fingers: Drag</string>
     <string name="history_title">History</string>
     <string name="history_empty">No recent images</string>
+    <string name="btn_scan">Scan Device for Images</string>
+    <string name="msg_scanning">Scanning storage...</string>
+    <string name="msg_scan_complete">Found %d images</string>
+    <string name="msg_no_images">No images found</string>
+    <string name="instruction">1-Finger Slide: Brightness • 3-Fingers: Switch Image • Double tap: Settings</string>
 </resources>

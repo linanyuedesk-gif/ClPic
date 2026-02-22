@@ -50,6 +50,18 @@ import org.json.JSONException;
 import java.util.ArrayList;
 import java.util.List;
 
+import android.os.Environment;
+import android.os.Handler;
+import android.os.Looper;
+import android.provider.Settings;
+import android.view.KeyEvent;
+import java.io.File;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.HashSet;
+import java.util.Set;
+
 public class MainActivity extends AppCompatActivity {
 
     private static final String PREFS_NAME = "PicPrefs";
@@ -69,6 +81,18 @@ public class MainActivity extends AppCompatActivity {
     private GestureDetector gestureDetector;
     private float lastTouchY;
     private boolean isTwoFingerDrag = false;
+    
+    // Gesture State
+    private float startX, startY;
+    private float startBrightness;
+    private boolean isBrightnessGesture = false;
+    private boolean isSwipeGesture = false;
+    private static final int SWIPE_THRESHOLD = 150;
+
+    // Playlist State
+    private List<String> playlist = new ArrayList<>();
+    private int currentPlaylistIndex = -1;
+    private boolean isScanning = false;
     
     // Geometry State
     private int screenWidth;
@@ -112,6 +136,7 @@ public class MainActivity extends AppCompatActivity {
         
         Button btnLocal = findViewById(R.id.btnSelectLocal);
         Button btnUrl = findViewById(R.id.btnLoadUrl);
+        Button btnScan = findViewById(R.id.btnScanDevice);
         
         updateScreenDimensions();
         setupGestures();
@@ -119,6 +144,8 @@ public class MainActivity extends AppCompatActivity {
 
         btnLocal.setOnClickListener(v -> openFilePicker());
         
+        btnScan.setOnClickListener(v -> startScan());
+
         btnUrl.setOnClickListener(v -> {
             String url = etUrl.getText().toString().trim();
             if(!url.isEmpty()) saveAndLoad(url);
@@ -205,43 +232,205 @@ public class MainActivity extends AppCompatActivity {
         rootLayout.setOnTouchListener((v, event) -> {
             gestureDetector.onTouchEvent(event);
             
-            // Only allow drag if screen is NOT blacked out
-            if (blackOverlay.getVisibility() != View.VISIBLE) {
-                switch (event.getActionMasked()) {
-                    case MotionEvent.ACTION_DOWN:
-                    case MotionEvent.ACTION_POINTER_DOWN:
-                        if (event.getPointerCount() == 2) {
-                            isTwoFingerDrag = true;
-                            lastTouchY = (event.getY(0) + event.getY(1)) / 2;
-                        } else {
-                            isTwoFingerDrag = false;
+            int action = event.getActionMasked();
+            int pointerCount = event.getPointerCount();
+
+            // Only allow interactions if screen is NOT blacked out (except for brightness gesture to wake up)
+            // Actually, we want brightness control even if blacked out to restore it.
+            
+            switch (action) {
+                case MotionEvent.ACTION_DOWN:
+                    startX = event.getX();
+                    startY = event.getY();
+                    if (pointerCount == 1) {
+                        isBrightnessGesture = true;
+                        WindowManager.LayoutParams lp = getWindow().getAttributes();
+                        startBrightness = lp.screenBrightness;
+                        if (startBrightness < 0) {
+                            try {
+                                startBrightness = Settings.System.getInt(getContentResolver(), Settings.System.SCREEN_BRIGHTNESS) / 255f;
+                            } catch (Settings.SettingNotFoundException e) {
+                                startBrightness = 0.5f;
+                            }
                         }
-                        break;
-                    case MotionEvent.ACTION_MOVE:
-                        if (isTwoFingerDrag && event.getPointerCount() == 2) {
-                            float avgY = (event.getY(0) + event.getY(1)) / 2;
-                            float dy = avgY - lastTouchY;
-                            updatePosition(dy);
-                            lastTouchY = avgY;
+                    }
+                    break;
+                    
+                case MotionEvent.ACTION_POINTER_DOWN:
+                    if (pointerCount == 2) {
+                        isTwoFingerDrag = true;
+                        lastTouchY = (event.getY(0) + event.getY(1)) / 2;
+                        isBrightnessGesture = false; // Cancel brightness if 2 fingers
+                    } else if (pointerCount == 3) {
+                        isSwipeGesture = true;
+                        startX = (event.getX(0) + event.getX(1) + event.getX(2)) / 3;
+                        isTwoFingerDrag = false;
+                        isBrightnessGesture = false;
+                    }
+                    break;
+
+                case MotionEvent.ACTION_MOVE:
+                    if (isBrightnessGesture && pointerCount == 1) {
+                        float deltaX = event.getX() - startX;
+                        // Threshold to avoid accidental brightness change on tap
+                        if (Math.abs(deltaX) > 50) {
+                            updateBrightness(deltaX);
                         }
-                        break;
-                    case MotionEvent.ACTION_POINTER_UP:
+                    } else if (isTwoFingerDrag && pointerCount == 2) {
+                        float avgY = (event.getY(0) + event.getY(1)) / 2;
+                        float dy = avgY - lastTouchY;
+                        updatePosition(dy);
+                        lastTouchY = avgY;
+                    } else if (isSwipeGesture && pointerCount == 3) {
+                        float avgX = (event.getX(0) + event.getX(1) + event.getX(2)) / 3;
+                        float deltaX = avgX - startX;
+                        if (Math.abs(deltaX) > SWIPE_THRESHOLD) {
+                            if (deltaX > 0) {
+                                switchImage(-1); // Prev
+                            } else {
+                                switchImage(1); // Next
+                            }
+                            isSwipeGesture = false; // Consume swipe
+                        }
+                    }
+                    break;
+
+                case MotionEvent.ACTION_POINTER_UP:
+                    if (pointerCount == 2) { // One finger lifted from 2
                         if (isTwoFingerDrag) {
                             savePosition();
                             isTwoFingerDrag = false;
                         }
-                        break;
-                    case MotionEvent.ACTION_UP:
-                    case MotionEvent.ACTION_CANCEL:
-                        if (isTwoFingerDrag) {
-                            savePosition();
-                            isTwoFingerDrag = false;
-                        }
-                        break;
-                }
+                    } else if (pointerCount == 3) { // One finger lifted from 3
+                         isSwipeGesture = false;
+                    }
+                    break;
+
+                case MotionEvent.ACTION_UP:
+                case MotionEvent.ACTION_CANCEL:
+                    if (isTwoFingerDrag) {
+                        savePosition();
+                        isTwoFingerDrag = false;
+                    }
+                    isBrightnessGesture = false;
+                    isSwipeGesture = false;
+                    break;
             }
             return true;
         });
+    }
+
+    private void updateBrightness(float deltaX) {
+        float width = rootLayout.getWidth();
+        if (width <= 0) return;
+        
+        float change = deltaX / width; // Sensitivity: full width = 1.0 change
+        float newBrightness = startBrightness + change;
+        
+        // Logic: 
+        // 0.01 to 1.0 is normal brightness.
+        // < 0.01 is "ultra low" simulated by black overlay.
+        // Let's map -0.5 to 1.0 range.
+        // -0.5 to 0.0: Overlay Alpha 1.0 to 0.0, Screen Brightness 0.01
+        // 0.0 to 1.0: Overlay Alpha 0.0, Screen Brightness 0.01 to 1.0
+        
+        WindowManager.LayoutParams lp = getWindow().getAttributes();
+        
+        if (newBrightness < 0.01f) {
+            lp.screenBrightness = 0.01f;
+            float alpha = Math.min(0.95f, Math.abs(newBrightness) * 2); // Max alpha 0.95
+            blackOverlay.setAlpha(alpha);
+            blackOverlay.setVisibility(View.VISIBLE);
+        } else {
+            if (newBrightness > 1.0f) newBrightness = 1.0f;
+            lp.screenBrightness = newBrightness;
+            blackOverlay.setVisibility(View.GONE);
+            blackOverlay.setAlpha(0f);
+        }
+        
+        getWindow().setAttributes(lp);
+    }
+
+    private void switchImage(int direction) {
+        if (playlist.isEmpty()) {
+            Toast.makeText(this, R.string.history_empty, Toast.LENGTH_SHORT).show();
+            return;
+        }
+        
+        currentPlaylistIndex += direction;
+        if (currentPlaylistIndex < 0) currentPlaylistIndex = playlist.size() - 1;
+        if (currentPlaylistIndex >= playlist.size()) currentPlaylistIndex = 0;
+        
+        String nextUri = playlist.get(currentPlaylistIndex);
+        saveAndLoad(nextUri);
+        Toast.makeText(this, (currentPlaylistIndex + 1) + "/" + playlist.size(), Toast.LENGTH_SHORT).show();
+    }
+
+    private void startScan() {
+        if (isScanning) return;
+        isScanning = true;
+        progressBar.setVisibility(View.VISIBLE);
+        Toast.makeText(this, R.string.msg_scanning, Toast.LENGTH_SHORT).show();
+        
+        new Thread(() -> {
+            List<String> foundImages = new ArrayList<>();
+            Set<String> visited = new HashSet<>();
+            
+            // Scan common directories
+            File[] roots = {
+                Environment.getExternalStorageDirectory(),
+                new File("/storage"),
+                new File("/mnt")
+            };
+            
+            for (File root : roots) {
+                scanDirectory(root, foundImages, visited);
+            }
+            
+            // Sort by name
+            Collections.sort(foundImages, String::compareToIgnoreCase);
+            
+            runOnUiThread(() -> {
+                isScanning = false;
+                progressBar.setVisibility(View.GONE);
+                if (!foundImages.isEmpty()) {
+                    playlist.clear();
+                    playlist.addAll(foundImages);
+                    currentPlaylistIndex = 0;
+                    Toast.makeText(this, String.format(getString(R.string.msg_scan_complete), foundImages.size()), Toast.LENGTH_LONG).show();
+                    // Auto load first found
+                    saveAndLoad(playlist.get(0));
+                } else {
+                    Toast.makeText(this, R.string.msg_no_images, Toast.LENGTH_LONG).show();
+                }
+            });
+        }).start();
+    }
+
+    private void scanDirectory(File dir, List<String> results, Set<String> visited) {
+        if (dir == null || !dir.exists() || !dir.isDirectory()) return;
+        try {
+            // Avoid loops and system dirs
+            if (visited.contains(dir.getCanonicalPath())) return;
+            visited.add(dir.getCanonicalPath());
+            if (dir.getName().startsWith(".")) return; // Skip hidden
+            
+            File[] files = dir.listFiles();
+            if (files == null) return;
+            
+            for (File f : files) {
+                if (f.isDirectory()) {
+                    scanDirectory(f, results, visited);
+                } else {
+                    String name = f.getName().toLowerCase();
+                    if (name.endsWith(".jpg") || name.endsWith(".jpeg") || name.endsWith(".png") || name.endsWith(".bmp") || name.endsWith(".webp")) {
+                        results.add(Uri.fromFile(f).toString());
+                    }
+                }
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "Error scanning " + dir, e);
+        }
     }
 
     private void updatePosition(float dy) {
@@ -313,6 +502,15 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void saveAndLoad(String uri) {
+        // Update playlist index if loading manually
+        if (playlist.contains(uri)) {
+            currentPlaylistIndex = playlist.indexOf(uri);
+        } else {
+            // Add to playlist if not present
+            playlist.add(0, uri);
+            currentPlaylistIndex = 0;
+        }
+
         // Save current URI
         currentUriString = uri;
         getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
