@@ -12,5 +12,5 @@
     <string name="msg_scanning">Scanning storage...</string>
     <string name="msg_scan_complete">Found %d images</string>
     <string name="msg_no_images">No images found</string>
-    <string name="instruction">1-Finger Slide: Brightness • 3-Fingers: Switch Image • Double tap: Settings</string>
+    <string name="instruction">1-Tap: Dark/Light • 1-Finger Slide: Brightness • 2-Finger: Zoom/Pan • 3-Fingers: Switch Image • 2-Finger 3-Tap: Private Mode</string>
 </resources>

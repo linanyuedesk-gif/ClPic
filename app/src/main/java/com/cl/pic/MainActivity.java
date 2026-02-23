@@ -62,11 +62,17 @@ import java.util.Comparator;
 import java.util.HashSet;
 import java.util.Set;
 
+import android.view.ScaleGestureDetector;
+
+import android.view.ViewConfiguration;
+
 public class MainActivity extends AppCompatActivity {
 
     private static final String PREFS_NAME = "PicPrefs";
-    private static final String KEY_URI = "last_image_uri";
-    private static final String KEY_HISTORY = "history_json";
+    private static final String KEY_URI_PUBLIC = "last_image_uri_public";
+    private static final String KEY_URI_PRIVATE = "last_image_uri_private";
+    private static final String KEY_HISTORY_PUBLIC = "history_public";
+    private static final String KEY_HISTORY_PRIVATE = "history_private";
     private static final String TAG = "CarPicViewer";
     private static final int MAX_HISTORY = 10;
 
@@ -79,25 +85,31 @@ public class MainActivity extends AppCompatActivity {
     private ProgressBar progressBar;
     
     private GestureDetector gestureDetector;
-    private float lastTouchY;
-    private boolean isTwoFingerDrag = false;
+    private ScaleGestureDetector scaleGestureDetector;
     
     // Gesture State
     private float startX, startY;
     private float startBrightness;
+    private float startOverlayAlpha;
     private boolean isBrightnessGesture = false;
-    private boolean isSwipeGesture = false;
-    private static final int SWIPE_THRESHOLD = 150;
+    private boolean isDarkControlGesture = false;
+    private boolean isGestureLocked = false;
+    private int touchSlop;
+    
+    // Two-finger triple tap state
+    private long lastTwoFingerDownTime = 0;
+    private int twoFingerTapCount = 0;
+    private static final long MULTI_TAP_TIMEOUT = 500;
 
     // Playlist State
     private List<String> playlist = new ArrayList<>();
     private int currentPlaylistIndex = -1;
     private boolean isScanning = false;
+    private boolean isPrivateMode = false;
     
     // Geometry State
     private int screenWidth;
     private int screenHeight;
-    private float currentImageHeight = 0f;
     private Matrix currentMatrix = new Matrix();
     private String currentUriString;
 
@@ -151,8 +163,11 @@ public class MainActivity extends AppCompatActivity {
             if(!url.isEmpty()) saveAndLoad(url);
         });
 
+        touchSlop = ViewConfiguration.get(this).getScaledTouchSlop();
+
         SharedPreferences prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
-        String last = prefs.getString(KEY_URI, null);
+        // Always start in public mode
+        String last = prefs.getString(KEY_URI_PUBLIC, null);
         if (last != null) {
             currentUriString = last;
             loadImage(last);
@@ -222,28 +237,58 @@ public class MainActivity extends AppCompatActivity {
                 if (configPanel.getVisibility() == View.VISIBLE) {
                     toggleConfig(); // Close config if open
                 } else {
-                    toggleBlackScreen(); // Toggle black screen otherwise
+                    toggleBlackScreen(); // Toggle Dark/Light mode
                 }
                 return true;
             }
         });
 
-        // Attach listener to rootLayout so it works even if ImageView is empty or hidden
+        scaleGestureDetector = new ScaleGestureDetector(this, new ScaleGestureDetector.SimpleOnScaleGestureListener() {
+            @Override
+            public boolean onScale(ScaleGestureDetector detector) {
+                float scaleFactor = detector.getScaleFactor();
+                float[] values = new float[9];
+                currentMatrix.getValues(values);
+                float currentScale = values[Matrix.MSCALE_X];
+                
+                // Calculate new scale
+                float newScale = currentScale * scaleFactor;
+                
+                // Enforce min scale (fit width)
+                float minScale = 1.0f; // Assuming initial scale fits width, we can calculate exact min scale if needed
+                // Actually, let's calculate min scale based on image width vs screen width
+                // But since we reset matrix to fit width on load, min scale relative to that is 1.0
+                // However, we need to know the original bitmap size to be precise.
+                // For now, let's just prevent shrinking smaller than screen width.
+                
+                // We can check the resulting image width
+                // float imageWidth = currentImageWidth * newScale / currentScale; 
+                // This is hard without storing original dimensions.
+                // Let's rely on checkBounds() to correct it or limit scaleFactor.
+                
+                currentMatrix.postScale(scaleFactor, scaleFactor, detector.getFocusX(), detector.getFocusY());
+                checkBoundsAndFix();
+                imageView.setImageMatrix(currentMatrix);
+                return true;
+            }
+        });
+
         rootLayout.setOnTouchListener((v, event) -> {
+            // Pass to detectors
+            scaleGestureDetector.onTouchEvent(event);
             gestureDetector.onTouchEvent(event);
             
             int action = event.getActionMasked();
             int pointerCount = event.getPointerCount();
 
-            // Only allow interactions if screen is NOT blacked out (except for brightness gesture to wake up)
-            // Actually, we want brightness control even if blacked out to restore it.
-            
             switch (action) {
                 case MotionEvent.ACTION_DOWN:
                     startX = event.getX();
                     startY = event.getY();
+                    isGestureLocked = false;
+                    
                     if (pointerCount == 1) {
-                        isBrightnessGesture = true;
+                        // Initialize values, but don't lock mode yet
                         WindowManager.LayoutParams lp = getWindow().getAttributes();
                         startBrightness = lp.screenBrightness;
                         if (startBrightness < 0) {
@@ -253,231 +298,283 @@ public class MainActivity extends AppCompatActivity {
                                 startBrightness = 0.5f;
                             }
                         }
+                        startOverlayAlpha = blackOverlay.getAlpha();
+                        
+                        // Initial guess based on current state (will be overridden by move direction)
+                        if (blackOverlay.getVisibility() == View.VISIBLE) {
+                            isDarkControlGesture = true;
+                            isBrightnessGesture = false;
+                        } else {
+                            isBrightnessGesture = true;
+                            isDarkControlGesture = false;
+                        }
                     }
                     break;
                     
                 case MotionEvent.ACTION_POINTER_DOWN:
                     if (pointerCount == 2) {
-                        isTwoFingerDrag = true;
-                        lastTouchY = (event.getY(0) + event.getY(1)) / 2;
-                        isBrightnessGesture = false; // Cancel brightness if 2 fingers
-                    } else if (pointerCount == 3) {
-                        isSwipeGesture = true;
-                        startX = (event.getX(0) + event.getX(1) + event.getX(2)) / 3;
-                        isTwoFingerDrag = false;
+                        // Check for 2-finger triple tap
+                        long now = System.currentTimeMillis();
+                        if (now - lastTwoFingerDownTime < MULTI_TAP_TIMEOUT) {
+                            twoFingerTapCount++;
+                        } else {
+                            twoFingerTapCount = 1;
+                        }
+                        lastTwoFingerDownTime = now;
+                        
+                        if (twoFingerTapCount == 3) {
+                            togglePrivateMode();
+                            twoFingerTapCount = 0;
+                        }
+                        
+                        // Reset single finger gestures
                         isBrightnessGesture = false;
+                        isDarkControlGesture = false;
+                        isGestureLocked = true; // Lock to prevent single finger logic
+                        
+                        // Prepare for pan (handled in MOVE if not scaling)
+                        startX = (event.getX(0) + event.getX(1)) / 2;
+                        startY = (event.getY(0) + event.getY(1)) / 2;
                     }
                     break;
 
                 case MotionEvent.ACTION_MOVE:
-                    if (isBrightnessGesture && pointerCount == 1) {
-                        float deltaX = event.getX() - startX;
-                        // Threshold to avoid accidental brightness change on tap
-                        if (Math.abs(deltaX) > 50) {
-                            updateBrightness(deltaX);
-                        }
-                    } else if (isTwoFingerDrag && pointerCount == 2) {
-                        float avgY = (event.getY(0) + event.getY(1)) / 2;
-                        float dy = avgY - lastTouchY;
-                        updatePosition(dy);
-                        lastTouchY = avgY;
-                    } else if (isSwipeGesture && pointerCount == 3) {
-                        float avgX = (event.getX(0) + event.getX(1) + event.getX(2)) / 3;
-                        float deltaX = avgX - startX;
-                        if (Math.abs(deltaX) > SWIPE_THRESHOLD) {
-                            if (deltaX > 0) {
-                                switchImage(-1); // Prev
-                            } else {
-                                switchImage(1); // Next
+                    if (scaleGestureDetector.isInProgress()) {
+                        // Scaling, do nothing else
+                        isBrightnessGesture = false;
+                        isDarkControlGesture = false;
+                        isGestureLocked = true;
+                    } else if (pointerCount == 1) {
+                        if (!isGestureLocked) {
+                            float dx = event.getX() - startX;
+                            float dy = event.getY() - startY;
+                            if (Math.hypot(dx, dy) > touchSlop) {
+                                isGestureLocked = true;
+                                if (Math.abs(dx) > Math.abs(dy)) {
+                                    // Horizontal -> Light Mode
+                                    isBrightnessGesture = true;
+                                    isDarkControlGesture = false;
+                                    
+                                    // Switch to Light Mode if needed
+                                    if (blackOverlay.getVisibility() == View.VISIBLE) {
+                                        blackOverlay.setVisibility(View.GONE);
+                                    }
+                                    
+                                    // Reset baseline
+                                    WindowManager.LayoutParams lp = getWindow().getAttributes();
+                                    startBrightness = lp.screenBrightness;
+                                    if (startBrightness < 0) {
+                                        try {
+                                            startBrightness = Settings.System.getInt(getContentResolver(), Settings.System.SCREEN_BRIGHTNESS) / 255f;
+                                        } catch (Settings.SettingNotFoundException e) {
+                                            startBrightness = 0.5f;
+                                        }
+                                    }
+                                    startX = event.getX(); // Reset startX to avoid jump
+                                } else {
+                                    // Vertical -> Dark Mode
+                                    isBrightnessGesture = false;
+                                    isDarkControlGesture = true;
+                                    
+                                    // Switch to Dark Mode if needed
+                                    if (blackOverlay.getVisibility() != View.VISIBLE) {
+                                        blackOverlay.setVisibility(View.VISIBLE);
+                                        blackOverlay.setAlpha(0f); // Start transparent
+                                        
+                                        // Set screen brightness to min
+                                        WindowManager.LayoutParams lp = getWindow().getAttributes();
+                                        lp.screenBrightness = 0.01f;
+                                        getWindow().setAttributes(lp);
+                                    }
+                                    
+                                    // Reset baseline
+                                    startOverlayAlpha = blackOverlay.getAlpha();
+                                    startY = event.getY(); // Reset startY
+                                }
                             }
-                            isSwipeGesture = false; // Consume swipe
                         }
-                    }
-                    break;
-
-                case MotionEvent.ACTION_POINTER_UP:
-                    if (pointerCount == 2) { // One finger lifted from 2
-                        if (isTwoFingerDrag) {
-                            savePosition();
-                            isTwoFingerDrag = false;
+                        
+                        if (isBrightnessGesture) {
+                            // Light Mode: Left/Right -> Brightness
+                            float deltaX = event.getX() - startX;
+                            updateLightBrightness(deltaX);
+                        } else if (isDarkControlGesture) {
+                            // Dark Mode: Up/Down -> Dark Brightness (Alpha)
+                            float deltaY = event.getY() - startY;
+                            updateDarkBrightness(deltaY);
                         }
-                    } else if (pointerCount == 3) { // One finger lifted from 3
-                         isSwipeGesture = false;
+                    } else if (pointerCount == 2) {
+                        // Pan
+                        float currX = (event.getX(0) + event.getX(1)) / 2;
+                        float currY = (event.getY(0) + event.getY(1)) / 2;
+                        float dx = currX - startX;
+                        float dy = currY - startY;
+                        
+                        currentMatrix.postTranslate(dx, dy);
+                        checkBoundsAndFix();
+                        imageView.setImageMatrix(currentMatrix);
+                        
+                        startX = currX;
+                        startY = currY;
                     }
                     break;
 
                 case MotionEvent.ACTION_UP:
                 case MotionEvent.ACTION_CANCEL:
-                    if (isTwoFingerDrag) {
-                        savePosition();
-                        isTwoFingerDrag = false;
-                    }
                     isBrightnessGesture = false;
-                    isSwipeGesture = false;
+                    isDarkControlGesture = false;
+                    savePosition();
                     break;
             }
             return true;
         });
     }
 
-    private void updateBrightness(float deltaX) {
+    private void updateLightBrightness(float deltaX) {
         float width = rootLayout.getWidth();
         if (width <= 0) return;
         
-        float change = deltaX / width; // Sensitivity: full width = 1.0 change
+        float change = deltaX / width; 
         float newBrightness = startBrightness + change;
         
-        // Logic: 
-        // 0.01 to 1.0 is normal brightness.
-        // < 0.01 is "ultra low" simulated by black overlay.
-        // Let's map -0.5 to 1.0 range.
-        // -0.5 to 0.0: Overlay Alpha 1.0 to 0.0, Screen Brightness 0.01
-        // 0.0 to 1.0: Overlay Alpha 0.0, Screen Brightness 0.01 to 1.0
+        if (newBrightness < 0.01f) newBrightness = 0.01f;
+        if (newBrightness > 1.0f) newBrightness = 1.0f;
         
         WindowManager.LayoutParams lp = getWindow().getAttributes();
-        
-        if (newBrightness < 0.01f) {
-            lp.screenBrightness = 0.01f;
-            float alpha = Math.min(0.95f, Math.abs(newBrightness) * 2); // Max alpha 0.95
-            blackOverlay.setAlpha(alpha);
-            blackOverlay.setVisibility(View.VISIBLE);
-        } else {
-            if (newBrightness > 1.0f) newBrightness = 1.0f;
-            lp.screenBrightness = newBrightness;
-            blackOverlay.setVisibility(View.GONE);
-            blackOverlay.setAlpha(0f);
-        }
-        
+        lp.screenBrightness = newBrightness;
         getWindow().setAttributes(lp);
     }
 
-    private void switchImage(int direction) {
-        if (playlist.isEmpty()) {
-            Toast.makeText(this, R.string.history_empty, Toast.LENGTH_SHORT).show();
-            return;
-        }
+    private void updateDarkBrightness(float deltaY) {
+        float height = rootLayout.getHeight();
+        if (height <= 0) return;
         
-        currentPlaylistIndex += direction;
-        if (currentPlaylistIndex < 0) currentPlaylistIndex = playlist.size() - 1;
-        if (currentPlaylistIndex >= playlist.size()) currentPlaylistIndex = 0;
+        // Up (negative deltaY) -> Brighter (Lower Alpha)
+        // Down (positive deltaY) -> Darker (Higher Alpha)
+        float change = deltaY / height; 
         
-        String nextUri = playlist.get(currentPlaylistIndex);
-        saveAndLoad(nextUri);
-        Toast.makeText(this, (currentPlaylistIndex + 1) + "/" + playlist.size(), Toast.LENGTH_SHORT).show();
-    }
-
-    private void startScan() {
-        if (isScanning) return;
-        isScanning = true;
-        progressBar.setVisibility(View.VISIBLE);
-        Toast.makeText(this, R.string.msg_scanning, Toast.LENGTH_SHORT).show();
+        // If we drag down (positive), alpha increases (darker)
+        float newAlpha = startOverlayAlpha + change;
         
-        new Thread(() -> {
-            List<String> foundImages = new ArrayList<>();
-            Set<String> visited = new HashSet<>();
-            
-            // Scan common directories
-            File[] roots = {
-                Environment.getExternalStorageDirectory(),
-                new File("/storage"),
-                new File("/mnt")
-            };
-            
-            for (File root : roots) {
-                scanDirectory(root, foundImages, visited);
-            }
-            
-            // Sort by name
-            Collections.sort(foundImages, String::compareToIgnoreCase);
-            
-            runOnUiThread(() -> {
-                isScanning = false;
-                progressBar.setVisibility(View.GONE);
-                if (!foundImages.isEmpty()) {
-                    playlist.clear();
-                    playlist.addAll(foundImages);
-                    currentPlaylistIndex = 0;
-                    Toast.makeText(this, String.format(getString(R.string.msg_scan_complete), foundImages.size()), Toast.LENGTH_LONG).show();
-                    // Auto load first found
-                    saveAndLoad(playlist.get(0));
-                } else {
-                    Toast.makeText(this, R.string.msg_no_images, Toast.LENGTH_LONG).show();
-                }
-            });
-        }).start();
+        if (newAlpha < 0.0f) newAlpha = 0.0f;
+        if (newAlpha > 0.98f) newAlpha = 0.98f; // Don't go 100% black
+        
+        blackOverlay.setAlpha(newAlpha);
     }
-
-    private void scanDirectory(File dir, List<String> results, Set<String> visited) {
-        if (dir == null || !dir.exists() || !dir.isDirectory()) return;
-        try {
-            // Avoid loops and system dirs
-            if (visited.contains(dir.getCanonicalPath())) return;
-            visited.add(dir.getCanonicalPath());
-            if (dir.getName().startsWith(".")) return; // Skip hidden
-            
-            File[] files = dir.listFiles();
-            if (files == null) return;
-            
-            for (File f : files) {
-                if (f.isDirectory()) {
-                    scanDirectory(f, results, visited);
-                } else {
-                    String name = f.getName().toLowerCase();
-                    if (name.endsWith(".jpg") || name.endsWith(".jpeg") || name.endsWith(".png") || name.endsWith(".bmp") || name.endsWith(".webp")) {
-                        results.add(Uri.fromFile(f).toString());
-                    }
-                }
-            }
-        } catch (Exception e) {
-            Log.e(TAG, "Error scanning " + dir, e);
-        }
-    }
-
-    private void updatePosition(float dy) {
-        if (currentImageHeight <= 0 || screenHeight <= 0) return;
-
+    
+    private void checkBoundsAndFix() {
+        if (imageView.getDrawable() == null) return;
+        
         float[] values = new float[9];
         currentMatrix.getValues(values);
+        float transX = values[Matrix.MTRANS_X];
         float transY = values[Matrix.MTRANS_Y];
+        float scaleX = values[Matrix.MSCALE_X];
+        float scaleY = values[Matrix.MSCALE_Y];
         
-        float newTransY = transY + dy;
-        float minTransY, maxTransY;
-
-        if (currentImageHeight <= screenHeight) {
-            float offset = (screenHeight - currentImageHeight) / 2f;
+        int imgW = imageView.getDrawable().getIntrinsicWidth();
+        int imgH = imageView.getDrawable().getIntrinsicHeight();
+        float displayW = imgW * scaleX;
+        float displayH = imgH * scaleY;
+        
+        // 1. Min Scale Check: Width cannot be less than screen width
+        if (displayW < screenWidth) {
+            float fixScale = screenWidth / (float)imgW;
+            currentMatrix.setScale(fixScale, fixScale);
+            // Re-get values after reset
+            currentMatrix.getValues(values);
+            transX = values[Matrix.MTRANS_X];
+            transY = values[Matrix.MTRANS_Y];
+            scaleX = values[Matrix.MSCALE_X];
+            scaleY = values[Matrix.MSCALE_Y];
+            displayW = imgW * scaleX;
+            displayH = imgH * scaleY;
+        }
+        
+        // 2. Pan Bounds Check
+        float minTransX, maxTransX, minTransY, maxTransY;
+        
+        if (displayW <= screenWidth) {
+            minTransX = 0;
+            maxTransX = 0; // Center or stick to left? Usually center if smaller, but here we force min width = screen width
+            // If strictly equal, both 0.
+        } else {
+            minTransX = screenWidth - displayW;
+            maxTransX = 0;
+        }
+        
+        if (displayH <= screenHeight) {
+            // Center vertically
+            float offset = (screenHeight - displayH) / 2f;
             minTransY = offset;
             maxTransY = offset;
         } else {
-            minTransY = screenHeight - currentImageHeight;
+            minTransY = screenHeight - displayH;
             maxTransY = 0;
         }
-
+        
+        float newTransX = transX;
+        float newTransY = transY;
+        
+        if (newTransX > maxTransX) newTransX = maxTransX;
+        if (newTransX < minTransX) newTransX = minTransX;
+        
         if (newTransY > maxTransY) newTransY = maxTransY;
         if (newTransY < minTransY) newTransY = minTransY;
-
+        
+        values[Matrix.MTRANS_X] = newTransX;
         values[Matrix.MTRANS_Y] = newTransY;
         currentMatrix.setValues(values);
-        imageView.setImageMatrix(currentMatrix);
     }
 
-    private void savePosition() {
-        if (currentUriString == null) return;
+    private void togglePrivateMode() {
+        isPrivateMode = !isPrivateMode;
+        String modeName = isPrivateMode ? "Private Mode" : "Public Mode";
+        Toast.makeText(this, "Switched to " + modeName, Toast.LENGTH_SHORT).show();
         
-        float[] values = new float[9];
-        currentMatrix.getValues(values);
-        float y = values[Matrix.MTRANS_Y];
+        // Clear current playlist and reload history for the new mode
+        playlist.clear();
+        currentPlaylistIndex = -1;
         
-        getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            .edit()
-            .putFloat("pos_" + currentUriString, y)
-            .apply();
+        // Load history
+        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+        String key = isPrivateMode ? KEY_HISTORY_PRIVATE : KEY_HISTORY_PUBLIC;
+        String jsonString = prefs.getString(key, "[]");
+        try {
+            JSONArray jsonArray = new JSONArray(jsonString);
+            if (jsonArray.length() > 0) {
+                String last = jsonArray.getString(0);
+                saveAndLoad(last); // This will reload playlist from history
+            } else {
+                // No history in this mode
+                imageView.setImageDrawable(null);
+                currentUriString = null;
+                refreshHistoryUI();
+            }
+        } catch (JSONException e) {
+            e.printStackTrace();
+        }
     }
 
     private void toggleBlackScreen() {
         if (blackOverlay.getVisibility() == View.VISIBLE) {
+            // Switch to Light Mode
             blackOverlay.setVisibility(View.GONE);
+            // Restore brightness? Or keep as is?
+            // Usually we want to restore to a usable brightness if it was super dim
+            WindowManager.LayoutParams lp = getWindow().getAttributes();
+            if (lp.screenBrightness < 0.1f) {
+                lp.screenBrightness = 0.5f; // Default to mid brightness if it was too low
+                getWindow().setAttributes(lp);
+            }
         } else {
+            // Switch to Dark Mode
             blackOverlay.setVisibility(View.VISIBLE);
+            blackOverlay.setAlpha(0.0f); // Start transparent (brightest dark mode)
+            // Set screen brightness to min
+            WindowManager.LayoutParams lp = getWindow().getAttributes();
+            lp.screenBrightness = 0.01f;
+            getWindow().setAttributes(lp);
         }
         hideSystemUI();
     }
@@ -513,9 +610,10 @@ public class MainActivity extends AppCompatActivity {
 
         // Save current URI
         currentUriString = uri;
+        String key = isPrivateMode ? KEY_URI_PRIVATE : KEY_URI_PUBLIC;
         getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                 .edit()
-                .putString(KEY_URI, uri)
+                .putString(key, uri)
                 .apply();
         
         // Add to history
@@ -528,14 +626,15 @@ public class MainActivity extends AppCompatActivity {
 
     private void addToHistory(String uri) {
         SharedPreferences prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
-        String jsonString = prefs.getString(KEY_HISTORY, "[]");
+        String key = isPrivateMode ? KEY_HISTORY_PRIVATE : KEY_HISTORY_PUBLIC;
+        String jsonString = prefs.getString(key, "[]");
         List<String> list = new ArrayList<>();
         
         try {
             JSONArray jsonArray = new JSONArray(jsonString);
             for (int i = 0; i < jsonArray.length(); i++) {
                 String item = jsonArray.getString(i);
-                if (!item.equals(uri)) { // Remove duplicates (will add to top later)
+                if (!item.equals(uri)) { // Remove duplicates
                     list.add(item);
                 }
             }
@@ -553,13 +652,14 @@ public class MainActivity extends AppCompatActivity {
 
         // Save back
         JSONArray newArray = new JSONArray(list);
-        prefs.edit().putString(KEY_HISTORY, newArray.toString()).apply();
+        prefs.edit().putString(key, newArray.toString()).apply();
     }
 
     private void refreshHistoryUI() {
         historyContainer.removeAllViews();
         SharedPreferences prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
-        String jsonString = prefs.getString(KEY_HISTORY, "[]");
+        String key = isPrivateMode ? KEY_HISTORY_PRIVATE : KEY_HISTORY_PUBLIC;
+        String jsonString = prefs.getString(key, "[]");
 
         try {
             JSONArray jsonArray = new JSONArray(jsonString);
@@ -665,49 +765,69 @@ public class MainActivity extends AppCompatActivity {
             updateScreenDimensions();
         }
 
+        // Initial scale: Fit Width
         float scale = (float) screenWidth / imgW;
         currentMatrix.reset();
         currentMatrix.setScale(scale, scale);
         
-        currentImageHeight = imgH * scale;
-        
+        // Center vertically if it fits, otherwise top aligned (handled by checkBoundsAndFix logic usually, but let's set initial pos)
+        float displayH = imgH * scale;
         float transY = 0;
-        
-        float minTransY, maxTransY;
-        if (currentImageHeight <= screenHeight) {
-            float offset = (screenHeight - currentImageHeight) / 2f;
-            minTransY = offset;
-            maxTransY = offset;
-        } else {
-            minTransY = screenHeight - currentImageHeight;
-            maxTransY = 0;
+        if (displayH < screenHeight) {
+            transY = (screenHeight - displayH) / 2f;
         }
-
+        
         // Check for saved position
         SharedPreferences prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
         String key = "pos_" + currentUriString;
         
-        boolean restored = false;
         if (currentUriString != null && prefs.contains(key)) {
-            transY = prefs.getFloat(key, 0f);
-            
-            // Validate bounds (in case screen size changed or image changed)
-            if (transY > maxTransY) transY = maxTransY;
-            if (transY < minTransY) transY = minTransY;
-            restored = true;
-        }
-
-        if (!restored) {
-            if (currentImageHeight < screenHeight) {
-                transY = (screenHeight - currentImageHeight) / 2f;
-            } else {
-                transY = 0; 
+            // Legacy support: if only Y was saved (float), or new format (string "x,y")?
+            // The previous code saved a float. Let's try to read float first.
+            try {
+                float savedY = prefs.getFloat(key, 0f);
+                transY = savedY;
+                // If we want to support X in future, we need to change storage format or use separate keys.
+                // For now, let's stick to Y persistence as user didn't explicitly ask to persist X, just to adjust it.
+                // But if they adjust X, they might expect it to stay?
+                // "Support double finger left/right slide to adjust horizontal position"
+                // Let's assume persistence is good.
+                // But changing type from float to string might crash if we don't handle it.
+                // Let's use a new key for X: "pos_x_" + uri
+                if (prefs.contains("pos_x_" + currentUriString)) {
+                    float savedX = prefs.getFloat("pos_x_" + currentUriString, 0f);
+                    currentMatrix.postTranslate(savedX, transY);
+                } else {
+                    currentMatrix.postTranslate(0, transY);
+                }
+            } catch (ClassCastException e) {
+                // Maybe it changed type? Ignore.
+                currentMatrix.postTranslate(0, transY);
             }
+        } else {
+            currentMatrix.postTranslate(0, transY);
         }
-        
-        currentMatrix.postTranslate(0, transY);
         
         imageView.setImageMatrix(currentMatrix);
         imageView.setImageBitmap(bitmap);
+        
+        // Ensure bounds are valid (e.g. if screen rotated)
+        checkBoundsAndFix();
+        imageView.setImageMatrix(currentMatrix);
+    }
+
+    private void savePosition() {
+        if (currentUriString == null) return;
+        
+        float[] values = new float[9];
+        currentMatrix.getValues(values);
+        float x = values[Matrix.MTRANS_X];
+        float y = values[Matrix.MTRANS_Y];
+        
+        getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putFloat("pos_" + currentUriString, y)
+            .putFloat("pos_x_" + currentUriString, x)
+            .apply();
     }
 }
