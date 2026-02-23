@@ -829,4 +829,64 @@ public class MainActivity extends AppCompatActivity {
             .putFloat("pos_x_" + currentUriString, x)
             .apply();
     }
+
+    private void startScan() {
+        if (isScanning) return;
+        isScanning = true;
+        
+        Toast.makeText(this, R.string.msg_scanning, Toast.LENGTH_SHORT).show();
+        playlist.clear();
+        currentPlaylistIndex = -1;
+        
+        new Thread(() -> {
+            // Scan common directories
+            File[] dirs = {
+                Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DCIM),
+                Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES),
+                Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
+                new File(Environment.getExternalStorageDirectory(), "ClPic") // Custom folder
+            };
+            
+            for (File dir : dirs) {
+                if (dir.exists()) {
+                    scanDirectory(dir);
+                }
+            }
+            
+            // Sort playlist
+            Collections.sort(playlist, String::compareToIgnoreCase);
+            
+            new Handler(Looper.getMainLooper()).post(() -> {
+                isScanning = false;
+                String msg = String.format(getString(R.string.msg_scan_complete), playlist.size());
+                Toast.makeText(MainActivity.this, msg, Toast.LENGTH_SHORT).show();
+                
+                if (!playlist.isEmpty()) {
+                    // Load first image
+                    currentPlaylistIndex = 0;
+                    saveAndLoad(playlist.get(0));
+                } else {
+                    Toast.makeText(MainActivity.this, R.string.msg_no_images, Toast.LENGTH_SHORT).show();
+                }
+            });
+        }).start();
+    }
+
+    private void scanDirectory(File dir) {
+        File[] files = dir.listFiles();
+        if (files == null) return;
+        
+        for (File file : files) {
+            if (file.isDirectory()) {
+                scanDirectory(file);
+            } else {
+                String name = file.getName().toLowerCase();
+                if (name.endsWith(".jpg") || name.endsWith(".jpeg") || 
+                    name.endsWith(".png") || name.endsWith(".bmp") || 
+                    name.endsWith(".webp")) {
+                    playlist.add(Uri.fromFile(file).toString());
+                }
+            }
+        }
+    }
 }
