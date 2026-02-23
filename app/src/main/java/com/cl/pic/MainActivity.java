@@ -64,8 +64,6 @@ import java.util.Set;
 
 import android.view.ScaleGestureDetector;
 
-import android.view.ViewConfiguration;
-
 public class MainActivity extends AppCompatActivity {
 
     private static final String PREFS_NAME = "PicPrefs";
@@ -151,6 +149,9 @@ public class MainActivity extends AppCompatActivity {
         Button btnScan = findViewById(R.id.btnScanDevice);
         
         updateScreenDimensions();
+        
+        touchSlop = 24; // Hardcoded to avoid context issues
+        
         setupGestures();
         hideSystemUI();
 
@@ -162,8 +163,6 @@ public class MainActivity extends AppCompatActivity {
             String url = etUrl.getText().toString().trim();
             if(!url.isEmpty()) saveAndLoad(url);
         });
-
-        touchSlop = ViewConfiguration.get(this).getScaledTouchSlop();
 
         SharedPreferences prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
         // Always start in public mode
@@ -348,7 +347,7 @@ public class MainActivity extends AppCompatActivity {
                         if (!isGestureLocked) {
                             float dx = event.getX() - startX;
                             float dy = event.getY() - startY;
-                            if (Math.hypot(dx, dy) > touchSlop) {
+                            if (Math.sqrt(dx * dx + dy * dy) > touchSlop) {
                                 isGestureLocked = true;
                                 if (Math.abs(dx) > Math.abs(dy)) {
                                     // Horizontal -> Light Mode
