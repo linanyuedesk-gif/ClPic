@@ -85,14 +85,16 @@ public class MainActivity extends AppCompatActivity {
     private GestureDetector gestureDetector;
     private ScaleGestureDetector scaleGestureDetector;
     
-    // Gesture State
-    private float startX, startY;
-    private float startBrightness;
-    private float startOverlayAlpha;
-    private boolean isBrightnessGesture = false;
-    private boolean isDarkControlGesture = false;
-    private boolean isGestureLocked = false;
+    // Mode State
+    private float mode1Level = 0.8f; // Default Bright
+    private float mode2Level = 0.2f; // Default Dark
+    private boolean isMode2 = false;
+    private float startLevel; // For gesture calculation
     private int touchSlop;
+    private boolean isGestureLocked = false;
+    private float startX, startY;
+    
+
     
     // Two-finger triple tap state
     private long lastTwoFingerDownTime = 0;
@@ -151,6 +153,15 @@ public class MainActivity extends AppCompatActivity {
         updateScreenDimensions();
         
         touchSlop = 24; // Hardcoded to avoid context issues
+        
+        // Load saved levels
+        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+        mode1Level = prefs.getFloat("mode1_level", 0.8f);
+        mode2Level = prefs.getFloat("mode2_level", 0.2f);
+        isMode2 = prefs.getBoolean("is_mode2", false);
+        
+        // Apply initial brightness
+        applyBrightness(isMode2 ? mode2Level : mode1Level);
         
         setupGestures();
         hideSystemUI();
@@ -236,7 +247,7 @@ public class MainActivity extends AppCompatActivity {
                 if (configPanel.getVisibility() == View.VISIBLE) {
                     toggleConfig(); // Close config if open
                 } else {
-                    toggleBlackScreen(); // Toggle Dark/Light mode
+                    toggleMode(); // Toggle Mode 1/Mode 2
                 }
                 return true;
             }
@@ -246,25 +257,6 @@ public class MainActivity extends AppCompatActivity {
             @Override
             public boolean onScale(ScaleGestureDetector detector) {
                 float scaleFactor = detector.getScaleFactor();
-                float[] values = new float[9];
-                currentMatrix.getValues(values);
-                float currentScale = values[Matrix.MSCALE_X];
-                
-                // Calculate new scale
-                float newScale = currentScale * scaleFactor;
-                
-                // Enforce min scale (fit width)
-                float minScale = 1.0f; // Assuming initial scale fits width, we can calculate exact min scale if needed
-                // Actually, let's calculate min scale based on image width vs screen width
-                // But since we reset matrix to fit width on load, min scale relative to that is 1.0
-                // However, we need to know the original bitmap size to be precise.
-                // For now, let's just prevent shrinking smaller than screen width.
-                
-                // We can check the resulting image width
-                // float imageWidth = currentImageWidth * newScale / currentScale; 
-                // This is hard without storing original dimensions.
-                // Let's rely on checkBounds() to correct it or limit scaleFactor.
-                
                 currentMatrix.postScale(scaleFactor, scaleFactor, detector.getFocusX(), detector.getFocusY());
                 checkBoundsAndFix();
                 imageView.setImageMatrix(currentMatrix);
@@ -273,7 +265,6 @@ public class MainActivity extends AppCompatActivity {
         });
 
         rootLayout.setOnTouchListener((v, event) -> {
-            // Pass to detectors
             scaleGestureDetector.onTouchEvent(event);
             gestureDetector.onTouchEvent(event);
             
@@ -287,32 +278,12 @@ public class MainActivity extends AppCompatActivity {
                     isGestureLocked = false;
                     
                     if (pointerCount == 1) {
-                        // Initialize values, but don't lock mode yet
-                        WindowManager.LayoutParams lp = getWindow().getAttributes();
-                        startBrightness = lp.screenBrightness;
-                        if (startBrightness < 0) {
-                            try {
-                                startBrightness = Settings.System.getInt(getContentResolver(), Settings.System.SCREEN_BRIGHTNESS) / 255f;
-                            } catch (Settings.SettingNotFoundException e) {
-                                startBrightness = 0.5f;
-                            }
-                        }
-                        startOverlayAlpha = blackOverlay.getAlpha();
-                        
-                        // Initial guess based on current state (will be overridden by move direction)
-                        if (blackOverlay.getVisibility() == View.VISIBLE) {
-                            isDarkControlGesture = true;
-                            isBrightnessGesture = false;
-                        } else {
-                            isBrightnessGesture = true;
-                            isDarkControlGesture = false;
-                        }
+                        // Prepare for potential mode adjustment
                     }
                     break;
                     
                 case MotionEvent.ACTION_POINTER_DOWN:
                     if (pointerCount == 2) {
-                        // Check for 2-finger triple tap
                         long now = System.currentTimeMillis();
                         if (now - lastTwoFingerDownTime < MULTI_TAP_TIMEOUT) {
                             twoFingerTapCount++;
@@ -325,13 +296,7 @@ public class MainActivity extends AppCompatActivity {
                             togglePrivateMode();
                             twoFingerTapCount = 0;
                         }
-                        
-                        // Reset single finger gestures
-                        isBrightnessGesture = false;
-                        isDarkControlGesture = false;
                         isGestureLocked = true; // Lock to prevent single finger logic
-                        
-                        // Prepare for pan (handled in MOVE if not scaling)
                         startX = (event.getX(0) + event.getX(1)) / 2;
                         startY = (event.getY(0) + event.getY(1)) / 2;
                     }
@@ -339,9 +304,6 @@ public class MainActivity extends AppCompatActivity {
 
                 case MotionEvent.ACTION_MOVE:
                     if (scaleGestureDetector.isInProgress()) {
-                        // Scaling, do nothing else
-                        isBrightnessGesture = false;
-                        isDarkControlGesture = false;
                         isGestureLocked = true;
                     } else if (pointerCount == 1) {
                         if (!isGestureLocked) {
@@ -350,57 +312,39 @@ public class MainActivity extends AppCompatActivity {
                             if (Math.sqrt(dx * dx + dy * dy) > touchSlop) {
                                 isGestureLocked = true;
                                 if (Math.abs(dx) > Math.abs(dy)) {
-                                    // Horizontal -> Light Mode
-                                    isBrightnessGesture = true;
-                                    isDarkControlGesture = false;
-                                    
-                                    // Switch to Light Mode if needed
-                                    if (blackOverlay.getVisibility() == View.VISIBLE) {
-                                        blackOverlay.setVisibility(View.GONE);
-                                    }
-                                    
-                                    // Reset baseline
-                                    WindowManager.LayoutParams lp = getWindow().getAttributes();
-                                    startBrightness = lp.screenBrightness;
-                                    if (startBrightness < 0) {
-                                        try {
-                                            startBrightness = Settings.System.getInt(getContentResolver(), Settings.System.SCREEN_BRIGHTNESS) / 255f;
-                                        } catch (Settings.SettingNotFoundException e) {
-                                            startBrightness = 0.5f;
-                                        }
-                                    }
-                                    startX = event.getX(); // Reset startX to avoid jump
+                                    // Horizontal -> Mode 1
+                                    isMode2 = false;
+                                    startLevel = mode1Level;
+                                    startX = event.getX(); // Reset reference
+                                    showModeToast("Mode 1");
+                                    applyBrightness(mode1Level); // Switch immediately
                                 } else {
-                                    // Vertical -> Dark Mode
-                                    isBrightnessGesture = false;
-                                    isDarkControlGesture = true;
-                                    
-                                    // Switch to Dark Mode if needed
-                                    if (blackOverlay.getVisibility() != View.VISIBLE) {
-                                        blackOverlay.setVisibility(View.VISIBLE);
-                                        blackOverlay.setAlpha(0f); // Start transparent
-                                        
-                                        // Set screen brightness to min
-                                        WindowManager.LayoutParams lp = getWindow().getAttributes();
-                                        lp.screenBrightness = 0.01f;
-                                        getWindow().setAttributes(lp);
-                                    }
-                                    
-                                    // Reset baseline
-                                    startOverlayAlpha = blackOverlay.getAlpha();
-                                    startY = event.getY(); // Reset startY
+                                    // Vertical -> Mode 2
+                                    isMode2 = true;
+                                    startLevel = mode2Level;
+                                    startY = event.getY(); // Reset reference
+                                    showModeToast("Mode 2");
+                                    applyBrightness(mode2Level); // Switch immediately
                                 }
                             }
                         }
                         
-                        if (isBrightnessGesture) {
-                            // Light Mode: Left/Right -> Brightness
-                            float deltaX = event.getX() - startX;
-                            updateLightBrightness(deltaX);
-                        } else if (isDarkControlGesture) {
-                            // Dark Mode: Up/Down -> Dark Brightness (Alpha)
-                            float deltaY = event.getY() - startY;
-                            updateDarkBrightness(deltaY);
+                        if (isGestureLocked) {
+                            if (!isMode2) {
+                                // Mode 1 (Horizontal)
+                                float deltaX = event.getX() - startX;
+                                float change = deltaX / rootLayout.getWidth();
+                                mode1Level = clamp(startLevel + change);
+                                applyBrightness(mode1Level);
+                            } else {
+                                // Mode 2 (Vertical)
+                                // Up is negative deltaY, but we want Up -> Brighter (Higher Level)
+                                // So we subtract deltaY (or use -deltaY)
+                                float deltaY = startY - event.getY(); 
+                                float change = deltaY / rootLayout.getHeight();
+                                mode2Level = clamp(startLevel + change);
+                                applyBrightness(mode2Level);
+                            }
                         }
                     } else if (pointerCount == 2) {
                         // Pan
@@ -420,8 +364,6 @@ public class MainActivity extends AppCompatActivity {
 
                 case MotionEvent.ACTION_UP:
                 case MotionEvent.ACTION_CANCEL:
-                    isBrightnessGesture = false;
-                    isDarkControlGesture = false;
                     savePosition();
                     break;
             }
@@ -429,37 +371,50 @@ public class MainActivity extends AppCompatActivity {
         });
     }
 
-    private void updateLightBrightness(float deltaX) {
-        float width = rootLayout.getWidth();
-        if (width <= 0) return;
-        
-        float change = deltaX / width; 
-        float newBrightness = startBrightness + change;
-        
-        if (newBrightness < 0.01f) newBrightness = 0.01f;
-        if (newBrightness > 1.0f) newBrightness = 1.0f;
-        
-        WindowManager.LayoutParams lp = getWindow().getAttributes();
-        lp.screenBrightness = newBrightness;
-        getWindow().setAttributes(lp);
+    private float clamp(float val) {
+        return Math.max(0.0f, Math.min(1.0f, val));
     }
 
-    private void updateDarkBrightness(float deltaY) {
-        float height = rootLayout.getHeight();
-        if (height <= 0) return;
+    private void applyBrightness(float level) {
+        WindowManager.LayoutParams lp = getWindow().getAttributes();
+        float screenBrightness;
+        float overlayAlpha;
         
-        // Up (negative deltaY) -> Brighter (Lower Alpha)
-        // Down (positive deltaY) -> Darker (Higher Alpha)
-        float change = deltaY / height; 
+        // 0.0 -> 0.5: Overlay 1.0 -> 0.0 (Screen Min)
+        // 0.5 -> 1.0: Screen Min -> Max (Overlay 0.0)
         
-        // If we drag down (positive), alpha increases (darker)
-        float newAlpha = startOverlayAlpha + change;
+        if (level < 0.5f) {
+            screenBrightness = 0.01f;
+            // Map 0.0-0.5 to Alpha 1.0-0.0
+            overlayAlpha = 1.0f - (level * 2.0f);
+        } else {
+            overlayAlpha = 0.0f;
+            // Map 0.5-1.0 to Brightness 0.01-1.0
+            screenBrightness = 0.01f + (level - 0.5f) * 2.0f * 0.99f;
+        }
         
-        if (newAlpha < 0.0f) newAlpha = 0.0f;
-        if (newAlpha > 0.98f) newAlpha = 0.98f; // Don't go 100% black
+        lp.screenBrightness = screenBrightness;
+        getWindow().setAttributes(lp);
         
-        blackOverlay.setAlpha(newAlpha);
+        blackOverlay.setVisibility(overlayAlpha > 0 ? View.VISIBLE : View.GONE);
+        blackOverlay.setAlpha(overlayAlpha);
     }
+
+    private void toggleMode() {
+        isMode2 = !isMode2;
+        applyBrightness(isMode2 ? mode2Level : mode1Level);
+        showModeToast(isMode2 ? "Mode 2" : "Mode 1");
+        
+        getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit().putBoolean("is_mode2", isMode2).apply();
+    }
+    
+    private void showModeToast(String msg) {
+        Toast toast = Toast.makeText(this, msg, Toast.LENGTH_SHORT);
+        toast.setGravity(Gravity.CENTER, 0, 0);
+        toast.show();
+    }
+
     
     private void checkBoundsAndFix() {
         if (imageView.getDrawable() == null) return;
@@ -555,28 +510,7 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    private void toggleBlackScreen() {
-        if (blackOverlay.getVisibility() == View.VISIBLE) {
-            // Switch to Light Mode
-            blackOverlay.setVisibility(View.GONE);
-            // Restore brightness? Or keep as is?
-            // Usually we want to restore to a usable brightness if it was super dim
-            WindowManager.LayoutParams lp = getWindow().getAttributes();
-            if (lp.screenBrightness < 0.1f) {
-                lp.screenBrightness = 0.5f; // Default to mid brightness if it was too low
-                getWindow().setAttributes(lp);
-            }
-        } else {
-            // Switch to Dark Mode
-            blackOverlay.setVisibility(View.VISIBLE);
-            blackOverlay.setAlpha(0.0f); // Start transparent (brightest dark mode)
-            // Set screen brightness to min
-            WindowManager.LayoutParams lp = getWindow().getAttributes();
-            lp.screenBrightness = 0.01f;
-            getWindow().setAttributes(lp);
-        }
-        hideSystemUI();
-    }
+
 
     private void toggleConfig() {
         if (configPanel.getVisibility() == View.VISIBLE) {
@@ -781,26 +715,26 @@ public class MainActivity extends AppCompatActivity {
         String key = "pos_" + currentUriString;
         
         if (currentUriString != null && prefs.contains(key)) {
-            // Legacy support: if only Y was saved (float), or new format (string "x,y")?
-            // The previous code saved a float. Let's try to read float first.
             try {
                 float savedY = prefs.getFloat(key, 0f);
                 transY = savedY;
-                // If we want to support X in future, we need to change storage format or use separate keys.
-                // For now, let's stick to Y persistence as user didn't explicitly ask to persist X, just to adjust it.
-                // But if they adjust X, they might expect it to stay?
-                // "Support double finger left/right slide to adjust horizontal position"
-                // Let's assume persistence is good.
-                // But changing type from float to string might crash if we don't handle it.
-                // Let's use a new key for X: "pos_x_" + uri
+                
+                float savedX = 0f;
                 if (prefs.contains("pos_x_" + currentUriString)) {
-                    float savedX = prefs.getFloat("pos_x_" + currentUriString, 0f);
-                    currentMatrix.postTranslate(savedX, transY);
-                } else {
-                    currentMatrix.postTranslate(0, transY);
+                    savedX = prefs.getFloat("pos_x_" + currentUriString, 0f);
                 }
+                
+                float savedScale = 0f;
+                if (prefs.contains("scale_" + currentUriString)) {
+                    savedScale = prefs.getFloat("scale_" + currentUriString, 0f);
+                }
+                
+                if (savedScale > 0) {
+                    currentMatrix.setScale(savedScale, savedScale);
+                }
+                currentMatrix.postTranslate(savedX, transY);
+                
             } catch (ClassCastException e) {
-                // Maybe it changed type? Ignore.
                 currentMatrix.postTranslate(0, transY);
             }
         } else {
@@ -822,11 +756,21 @@ public class MainActivity extends AppCompatActivity {
         currentMatrix.getValues(values);
         float x = values[Matrix.MTRANS_X];
         float y = values[Matrix.MTRANS_Y];
+        float scale = values[Matrix.MSCALE_X];
         
         getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
             .putFloat("pos_" + currentUriString, y)
             .putFloat("pos_x_" + currentUriString, x)
+            .putFloat("scale_" + currentUriString, scale)
+            .apply();
+            
+        // Also save brightness levels
+        getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putFloat("mode1_level", mode1Level)
+            .putFloat("mode2_level", mode2Level)
+            .putBoolean("is_mode2", isMode2)
             .apply();
     }
 
