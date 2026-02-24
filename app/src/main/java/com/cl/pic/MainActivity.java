@@ -175,7 +175,6 @@ public class MainActivity extends AppCompatActivity {
             if(!url.isEmpty()) saveAndLoad(url);
         });
 
-        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
         // Always start in public mode
         String last = prefs.getString(KEY_URI_PUBLIC, null);
         if (last != null) {
