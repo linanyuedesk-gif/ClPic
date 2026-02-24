@@ -91,7 +91,8 @@ public class MainActivity extends AppCompatActivity {
     private boolean isMode2 = false;
     private float startLevel; // For gesture calculation
     private int touchSlop;
-    private boolean isGestureLocked = false;
+    private boolean isAdjustingMode = false;
+    private boolean isZoomingOrPanning = false;
     private float startX, startY;
     
 
@@ -274,11 +275,8 @@ public class MainActivity extends AppCompatActivity {
                 case MotionEvent.ACTION_DOWN:
                     startX = event.getX();
                     startY = event.getY();
-                    isGestureLocked = false;
-                    
-                    if (pointerCount == 1) {
-                        // Prepare for potential mode adjustment
-                    }
+                    isAdjustingMode = false;
+                    isZoomingOrPanning = false;
                     break;
                     
                 case MotionEvent.ACTION_POINTER_DOWN:
@@ -295,21 +293,40 @@ public class MainActivity extends AppCompatActivity {
                             togglePrivateMode();
                             twoFingerTapCount = 0;
                         }
-                        isGestureLocked = true; // Lock to prevent single finger logic
+                        
+                        isZoomingOrPanning = true;
+                        isAdjustingMode = false; // Cancel single finger
                         startX = (event.getX(0) + event.getX(1)) / 2;
                         startY = (event.getY(0) + event.getY(1)) / 2;
+                    }
+                    break;
+                
+                case MotionEvent.ACTION_POINTER_UP:
+                    // If we were zooming, keep isZoomingOrPanning true so we don't switch to brightness
+                    if (pointerCount - 1 < 2) {
+                        // Dropping to 1 finger
+                        // Update startX/Y to prevent jump if we were panning?
+                        // But we are ignoring moves anyway if isZoomingOrPanning is true.
                     }
                     break;
 
                 case MotionEvent.ACTION_MOVE:
                     if (scaleGestureDetector.isInProgress()) {
-                        isGestureLocked = true;
-                    } else if (pointerCount == 1) {
-                        if (!isGestureLocked) {
+                        isZoomingOrPanning = true;
+                        isAdjustingMode = false;
+                    } 
+                    
+                    if (pointerCount == 1) {
+                        if (isZoomingOrPanning) {
+                            // Ignore single finger moves if we were/are zooming
+                            break; 
+                        }
+                        
+                        if (!isAdjustingMode) {
                             float dx = event.getX() - startX;
                             float dy = event.getY() - startY;
                             if (Math.sqrt(dx * dx + dy * dy) > touchSlop) {
-                                isGestureLocked = true;
+                                isAdjustingMode = true;
                                 if (Math.abs(dx) > Math.abs(dy)) {
                                     // Horizontal -> Mode 1
                                     isMode2 = false;
@@ -328,7 +345,7 @@ public class MainActivity extends AppCompatActivity {
                             }
                         }
                         
-                        if (isGestureLocked) {
+                        if (isAdjustingMode) {
                             if (!isMode2) {
                                 // Mode 1 (Horizontal)
                                 float deltaX = event.getX() - startX;
@@ -346,6 +363,8 @@ public class MainActivity extends AppCompatActivity {
                             }
                         }
                     } else if (pointerCount == 2) {
+                        isZoomingOrPanning = true;
+                        isAdjustingMode = false;
                         // Pan
                         float currX = (event.getX(0) + event.getX(1)) / 2;
                         float currY = (event.getY(0) + event.getY(1)) / 2;
@@ -363,6 +382,8 @@ public class MainActivity extends AppCompatActivity {
 
                 case MotionEvent.ACTION_UP:
                 case MotionEvent.ACTION_CANCEL:
+                    isAdjustingMode = false;
+                    isZoomingOrPanning = false;
                     savePosition();
                     break;
             }
