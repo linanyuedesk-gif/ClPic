@@ -1,16 +1,21 @@
 <resources>
     <string name="app_name">Car Pic Viewer</string>
-    <string name="config_title">Configuration</string>
-    <string name="btn_local">Select Local Image</string>
-    <string name="btn_url">Load URL</string>
-    <string name="url_hint">Image URL (https://...)</string>
-    <string name="msg_load_error">Failed to load image</string>
+    <string name="config_title">Image Configuration</string>
+    <string name="btn_local">Select Local</string>
+    <string name="btn_url">Load</string>
+    <string name="btn_scan">Scan Device</string>
+    <string name="btn_previous">Previous Image</string>
+    <string name="btn_next">Next Image</string>
+    <string name="btn_mode">Toggle Brightness Mode</string>
+    <string name="btn_config">Configuration</string>
+    <string name="url_hint">Enter image URL (https://...)</string>
+    <string name="msg_load_error">Failed to load image. Check URL or permissions.</string>
+    <string name="msg_load_success">Image loaded successfully</string>
     <string name="permission_rationale">Storage permission is required to view local images.</string>
-    <string name="history_title">History</string>
-    <string name="history_empty">No recent images</string>
-    <string name="btn_scan">Scan Device for Images</string>
-    <string name="msg_scanning">Scanning storage...</string>
-    <string name="msg_scan_complete">Found %d images</string>
-    <string name="msg_no_images">No images found</string>
-    <string name="instruction">1-Tap: Toggle Mode 1/2 • Slide H: Mode 1 • Slide V: Mode 2 • 2-Finger: Zoom/Pan • 3-Fingers: Switch Image • 2-Finger 3-Tap: Private Mode</string>
+    <string name="history_title">Recent Images</string>
+    <string name="history_empty">No recent images yet</string>
+    <string name="msg_scanning">Scanning device for images...</string>
+    <string name="msg_scan_complete">Found %d images on device</string>
+    <string name="msg_no_images">No images found on device</string>
+    <string name="instruction">TAP: Toggle Brightness Mode • SLIDE RIGHT: Next • SLIDE LEFT: Prev • 2-FINGER: Zoom/Pan • LONG PRESS CONFIG: Hide Nav Bar • Double TAP: Show Config</string>
 </resources>

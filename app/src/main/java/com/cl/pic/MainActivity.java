@@ -39,6 +39,7 @@ import androidx.appcompat.app.AppCompatActivity;
 
 import com.bumptech.glide.Glide;
 import com.bumptech.glide.load.DataSource;
+import com.bumptech.glide.load.engine.DiskCacheStrategy;
 import com.bumptech.glide.load.engine.GlideException;
 import com.bumptech.glide.request.RequestListener;
 import com.bumptech.glide.request.RequestOptions;
@@ -63,6 +64,10 @@ import java.util.HashSet;
 import java.util.Set;
 
 import android.view.ScaleGestureDetector;
+import android.animation.ValueAnimator;
+import android.animation.ObjectAnimator;
+import android.view.animation.DecelerateInterpolator;
+import android.view.animation.AccelerateDecelerateInterpolator;
 
 public class MainActivity extends AppCompatActivity {
 
@@ -79,8 +84,16 @@ public class MainActivity extends AppCompatActivity {
     private View blackOverlay;
     private LinearLayout configPanel;
     private LinearLayout historyContainer;
+    private LinearLayout navBar;
     private EditText etUrl;
     private ProgressBar progressBar;
+    private LinearLayout brightnessIndicator;
+    private ProgressBar brightnessBar;
+    private TextView brightnessLabel;
+    private Button btnPrevious;
+    private Button btnNext;
+    private Button btnToggleMode;
+    private Button btnConfig;
     
     private GestureDetector gestureDetector;
     private ScaleGestureDetector scaleGestureDetector;
@@ -113,6 +126,15 @@ public class MainActivity extends AppCompatActivity {
     private int screenHeight;
     private Matrix currentMatrix = new Matrix();
     private String currentUriString;
+    
+    // Animation state
+    private ValueAnimator brightnessAnimator;
+    private ValueAnimator configPanelAnimator;
+    
+    // Screen timeout
+    private static final long SCREEN_TIMEOUT_DELAY = 120000; // 2 minutes
+    private Handler screenTimeoutHandler;
+    private Runnable screenTimeoutRunnable;
 
     private final ActivityResultLauncher<Intent> filePickerLauncher =
             registerForActivityResult(new ActivityResultContracts.StartActivityForResult(), result -> {
@@ -144,8 +166,17 @@ public class MainActivity extends AppCompatActivity {
         blackOverlay = findViewById(R.id.blackOverlay);
         configPanel = findViewById(R.id.configPanel);
         historyContainer = findViewById(R.id.historyContainer);
+        navBar = findViewById(R.id.navBar);
         etUrl = findViewById(R.id.etUrl);
         progressBar = findViewById(R.id.loading);
+        brightnessIndicator = findViewById(R.id.brightnessIndicator);
+        brightnessBar = findViewById(R.id.brightnessBar);
+        brightnessLabel = findViewById(R.id.brightnessLabel);
+        
+        btnPrevious = findViewById(R.id.btnPrevious);
+        btnNext = findViewById(R.id.btnNext);
+        btnToggleMode = findViewById(R.id.btnToggleMode);
+        btnConfig = findViewById(R.id.btnConfig);
         
         Button btnLocal = findViewById(R.id.btnSelectLocal);
         Button btnUrl = findViewById(R.id.btnLoadUrl);
@@ -166,6 +197,27 @@ public class MainActivity extends AppCompatActivity {
         
         setupGestures();
         hideSystemUI();
+        
+        // Initialize screen timeout handler
+        screenTimeoutHandler = new Handler(Looper.getMainLooper());
+        screenTimeoutRunnable = () -> {
+            // Dim the screen (turn on black overlay)
+            if (blackOverlay.getVisibility() != View.VISIBLE && !isMode2) {
+                isMode2 = true;
+                applyBrightness(0.05f); // Very dim
+                showModeToast("Display Locked - Press Power to wake");
+            }
+        };
+        
+        // Setup car navigation buttons
+        btnPrevious.setOnClickListener(v -> loadPreviousImage());
+        btnNext.setOnClickListener(v -> loadNextImage());
+        btnToggleMode.setOnClickListener(v -> toggleMode());
+        btnConfig.setOnLongClickListener(v -> {
+            toggleNavBar();
+            return true;
+        });
+        btnConfig.setOnClickListener(v -> toggleConfig());
 
         btnLocal.setOnClickListener(v -> openFilePicker());
         
@@ -250,6 +302,35 @@ public class MainActivity extends AppCompatActivity {
                     toggleMode(); // Toggle Mode 1/Mode 2
                 }
                 return true;
+            }
+            
+            @Override
+            public boolean onFling(@NonNull MotionEvent e1, @NonNull MotionEvent e2, float velocityX, float velocityY) {
+                if (configPanel.getVisibility() == View.VISIBLE) {
+                    return false; // Don't handle fling when config is open
+                }
+                
+                float diffX = e2.getX() - e1.getX();
+                float diffY = e2.getY() - e1.getY();
+                
+                // If vertical movement, ignore (handle panning/zooming)
+                if (Math.abs(diffY) > Math.abs(diffX)) {
+                    return false;
+                }
+                
+                // Horizontal swipe
+                if (Math.abs(diffX) > 100) { // Minimum distance
+                    if (diffX > 0) {
+                        // Swipe right -> Previous image
+                        loadPreviousImage();
+                    } else {
+                        // Swipe left -> Next image
+                        loadNextImage();
+                    }
+                    return true;
+                }
+                
+                return false;
             }
         });
 
@@ -342,6 +423,8 @@ public class MainActivity extends AppCompatActivity {
                                     showModeToast("Mode 2");
                                     applyBrightness(mode2Level); // Switch immediately
                                 }
+                                // Show brightness indicator
+                                showBrightnessIndicator();
                             }
                         }
                         
@@ -396,33 +479,88 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void applyBrightness(float level) {
-        WindowManager.LayoutParams lp = getWindow().getAttributes();
-        float screenBrightness;
-        float overlayAlpha;
-        
-        // 0.0 -> 0.5: Overlay 1.0 -> 0.0 (Screen Min)
-        // 0.5 -> 1.0: Screen Min -> Max (Overlay 0.0)
-        
-        if (level < 0.5f) {
-            screenBrightness = 0.01f;
-            // Map 0.0-0.5 to Alpha 1.0-0.0
-            overlayAlpha = 1.0f - (level * 2.0f);
+        applyBrightness(level, false);
+    }
+
+    private void applyBrightness(float level, boolean animate) {
+        if (animate) {
+            // Animate brightness change
+            if (brightnessAnimator != null) {
+                brightnessAnimator.cancel();
+            }
+            
+            // Get current brightness to animate from
+            WindowManager.LayoutParams currentLp = getWindow().getAttributes();
+            float currentScreenBrightness = currentLp.screenBrightness;
+            float currentOverlayAlpha = blackOverlay.getAlpha();
+            
+            brightnessAnimator = ValueAnimator.ofFloat(0f, 1f);
+            brightnessAnimator.setDuration(300);
+            brightnessAnimator.setInterpolator(new DecelerateInterpolator());
+            brightnessAnimator.addUpdateListener(animation -> {
+                float progress = (float) animation.getAnimatedValue();
+                float targetScreenBrightness;
+                float targetOverlayAlpha;
+                
+                if (level < 0.5f) {
+                    targetScreenBrightness = 0.01f;
+                    targetOverlayAlpha = 1.0f - (level * 2.0f);
+                } else {
+                    targetOverlayAlpha = 0.0f;
+                    targetScreenBrightness = 0.01f + (level - 0.5f) * 2.0f * 0.99f;
+                }
+                
+                float interpolatedScreenBrightness = currentScreenBrightness + (targetScreenBrightness - currentScreenBrightness) * progress;
+                float interpolatedOverlayAlpha = currentOverlayAlpha + (targetOverlayAlpha - currentOverlayAlpha) * progress;
+                
+                WindowManager.LayoutParams lp = getWindow().getAttributes();
+                lp.screenBrightness = interpolatedScreenBrightness;
+                getWindow().setAttributes(lp);
+                
+                blackOverlay.setVisibility(interpolatedOverlayAlpha > 0.01 ? View.VISIBLE : View.GONE);
+                blackOverlay.setAlpha(interpolatedOverlayAlpha);
+                
+                // Update brightness indicator
+                updateBrightnessIndicator(level);
+            });
+            brightnessAnimator.start();
         } else {
-            overlayAlpha = 0.0f;
-            // Map 0.5-1.0 to Brightness 0.01-1.0
-            screenBrightness = 0.01f + (level - 0.5f) * 2.0f * 0.99f;
+            // Apply immediately
+            WindowManager.LayoutParams lp = getWindow().getAttributes();
+            float screenBrightness;
+            float overlayAlpha;
+            
+            if (level < 0.5f) {
+                screenBrightness = 0.01f;
+                overlayAlpha = 1.0f - (level * 2.0f);
+            } else {
+                overlayAlpha = 0.0f;
+                screenBrightness = 0.01f + (level - 0.5f) * 2.0f * 0.99f;
+            }
+            
+            lp.screenBrightness = screenBrightness;
+            getWindow().setAttributes(lp);
+            
+            blackOverlay.setVisibility(overlayAlpha > 0 ? View.VISIBLE : View.GONE);
+            blackOverlay.setAlpha(overlayAlpha);
+            
+            // Update brightness indicator
+            updateBrightnessIndicator(level);
         }
-        
-        lp.screenBrightness = screenBrightness;
-        getWindow().setAttributes(lp);
-        
-        blackOverlay.setVisibility(overlayAlpha > 0 ? View.VISIBLE : View.GONE);
-        blackOverlay.setAlpha(overlayAlpha);
+    }
+    
+    private void updateBrightnessIndicator(float level) {
+        brightnessBar.setProgress((int)(level * 100));
+        if (isMode2) {
+            brightnessLabel.setText(String.format("Dark Mode: %d%%", (int)(level * 100)));
+        } else {
+            brightnessLabel.setText(String.format("Bright Mode: %d%%", (int)(level * 100)));
+        }
     }
 
     private void toggleMode() {
         isMode2 = !isMode2;
-        applyBrightness(isMode2 ? mode2Level : mode1Level);
+        applyBrightness(isMode2 ? mode2Level : mode1Level, true); // Animate!
         showModeToast(isMode2 ? "Mode 2" : "Mode 1");
         
         getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -529,6 +667,28 @@ public class MainActivity extends AppCompatActivity {
             e.printStackTrace();
         }
     }
+    
+    private void loadNextImage() {
+        if (playlist.isEmpty()) {
+            Toast.makeText(this, "No images loaded", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        
+        currentPlaylistIndex = (currentPlaylistIndex + 1) % playlist.size();
+        saveAndLoad(playlist.get(currentPlaylistIndex));
+        Toast.makeText(this, String.format("Image %d/%d", currentPlaylistIndex + 1, playlist.size()), Toast.LENGTH_SHORT).show();
+    }
+    
+    private void loadPreviousImage() {
+        if (playlist.isEmpty()) {
+            Toast.makeText(this, "No images loaded", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        
+        currentPlaylistIndex = (currentPlaylistIndex - 1 + playlist.size()) % playlist.size();
+        saveAndLoad(playlist.get(currentPlaylistIndex));
+        Toast.makeText(this, String.format("Image %d/%d", currentPlaylistIndex + 1, playlist.size()), Toast.LENGTH_SHORT).show();
+    }
 
 
 
@@ -537,10 +697,17 @@ public class MainActivity extends AppCompatActivity {
             configPanel.setVisibility(View.GONE);
             hideSystemUI();
         } else {
-            // Ensure black overlay is off when opening config
-            blackOverlay.setVisibility(View.GONE);
             refreshHistoryUI();
             configPanel.setVisibility(View.VISIBLE);
+        }
+    }
+    
+    private void toggleNavBar() {
+        if (navBar.getVisibility() == View.VISIBLE) {
+            navBar.setVisibility(View.GONE);
+        } else {
+            navBar.setVisibility(View.VISIBLE);
+            hideSystemUI();
         }
     }
 
@@ -673,39 +840,53 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void loadImage(String uriString) {
-        if (uriString == null || uriString.isEmpty()) return;
+        if (uriString == null || uriString.isEmpty()) {
+            Toast.makeText(this, "Invalid image URI", Toast.LENGTH_SHORT).show();
+            return;
+        }
         
-        progressBar.setVisibility(View.VISIBLE);
-        
-        RequestOptions options = new RequestOptions()
-                .timeout(30000) 
-                .override(2048, 2048); 
+        try {
+            progressBar.setVisibility(View.VISIBLE);
+            
+            // Optimized Glide configuration with proper caching
+            RequestOptions options = new RequestOptions()
+                    .timeout(30000)
+                    .override(2048, 2048)
+                    .diskCacheStrategy(DiskCacheStrategy.AUTOMATIC)
+                    .skipMemoryCache(false);
 
-        Uri uri = Uri.parse(uriString);
+            Uri uri = Uri.parse(uriString);
 
-        Glide.with(this)
-            .asBitmap()
-            .load(uri)
-            .apply(options)
-            .listener(new RequestListener<Bitmap>() {
-                @Override
-                public boolean onLoadFailed(@Nullable GlideException e, Object model, Target<Bitmap> target, boolean isFirstResource) {
-                    progressBar.setVisibility(View.GONE);
-                    Log.e(TAG, "Failed to load image: " + uriString, e);
-                    Toast.makeText(MainActivity.this, R.string.msg_load_error, Toast.LENGTH_LONG).show();
-                    return false;
-                }
-
-                @Override
-                public boolean onResourceReady(Bitmap resource, Object model, Target<Bitmap> target, DataSource dataSource, boolean isFirstResource) {
-                    progressBar.setVisibility(View.GONE);
-                    if (resource != null) {
-                        renderImage(resource);
+            Glide.with(this)
+                .asBitmap()
+                .load(uri)
+                .apply(options)
+                .listener(new RequestListener<Bitmap>() {
+                    @Override
+                    public boolean onLoadFailed(@Nullable GlideException e, Object model, Target<Bitmap> target, boolean isFirstResource) {
+                        progressBar.setVisibility(View.GONE);
+                        Log.e(TAG, "Failed to load image: " + uriString, e);
+                        String errorMsg = (e != null) ? e.getMessage() : "Unknown error";
+                        Toast.makeText(MainActivity.this, getString(R.string.msg_load_error) + "\n" + errorMsg, Toast.LENGTH_LONG).show();
+                        return false;
                     }
-                    return true; 
-                }
-            })
-            .into(imageView);
+
+                    @Override
+                    public boolean onResourceReady(Bitmap resource, Object model, Target<Bitmap> target, DataSource dataSource, boolean isFirstResource) {
+                        progressBar.setVisibility(View.GONE);
+                        if (resource != null) {
+                            renderImage(resource);
+                        }
+                        Log.i(TAG, "Image loaded successfully: " + uriString);
+                        return true; 
+                    }
+                })
+                .into(imageView);
+        } catch (Exception e) {
+            progressBar.setVisibility(View.GONE);
+            Log.e(TAG, "Exception in loadImage: " + e.getMessage(), e);
+            Toast.makeText(this, "Error: " + e.getMessage(), Toast.LENGTH_SHORT).show();
+        }
     }
 
     private void renderImage(Bitmap bitmap) {
@@ -795,62 +976,209 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void startScan() {
-        if (isScanning) return;
+        if (isScanning) {
+            Toast.makeText(this, "Scan already in progress", Toast.LENGTH_SHORT).show();
+            return;
+        }
         isScanning = true;
+        progressBar.setVisibility(View.VISIBLE);
+        configPanel.setVisibility(View.GONE);
         
         Toast.makeText(this, R.string.msg_scanning, Toast.LENGTH_SHORT).show();
         playlist.clear();
         currentPlaylistIndex = -1;
         
         new Thread(() -> {
-            // Scan common directories
-            File[] dirs = {
-                Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DCIM),
-                Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES),
-                Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
-                new File(Environment.getExternalStorageDirectory(), "ClPic") // Custom folder
-            };
-            
-            for (File dir : dirs) {
-                if (dir.exists()) {
-                    scanDirectory(dir);
-                }
-            }
-            
-            // Sort playlist
-            Collections.sort(playlist, String::compareToIgnoreCase);
-            
-            new Handler(Looper.getMainLooper()).post(() -> {
-                isScanning = false;
-                String msg = String.format(getString(R.string.msg_scan_complete), playlist.size());
-                Toast.makeText(MainActivity.this, msg, Toast.LENGTH_SHORT).show();
+            long startTime = System.currentTimeMillis();
+            try {
+                // Scan common directories
+                File[] dirs = {
+                    Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DCIM),
+                    Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES),
+                    Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
+                    new File(Environment.getExternalStorageDirectory(), "ClPic"), // Custom folder
+                    new File(Environment.getExternalStorageDirectory(), "DCIM/Camera"),
+                };
                 
-                if (!playlist.isEmpty()) {
-                    // Load first image
-                    currentPlaylistIndex = 0;
-                    saveAndLoad(playlist.get(0));
-                } else {
-                    Toast.makeText(MainActivity.this, R.string.msg_no_images, Toast.LENGTH_SHORT).show();
+                for (File dir : dirs) {
+                    if (dir != null && dir.exists() && dir.isDirectory()) {
+                        scanDirectory(dir);
+                    }
                 }
-            });
+                
+                // Sort playlist
+                Collections.sort(playlist, String::compareToIgnoreCase);
+                
+                // Remove duplicates
+                Set<String> seen = new HashSet<>(playlist.size());
+                playlist.removeIf(uri -> !seen.add(uri));
+                
+                long scanTime = System.currentTimeMillis() - startTime;
+                Log.i(TAG, "Scan completed in " + scanTime + "ms, found " + playlist.size() + " images");
+                
+                new Handler(Looper.getMainLooper()).post(() -> {
+                    isScanning = false;
+                    progressBar.setVisibility(View.GONE);
+                    
+                    String msg = String.format(getString(R.string.msg_scan_complete), playlist.size());
+                    Toast.makeText(MainActivity.this, msg, Toast.LENGTH_SHORT).show();
+                    
+                    if (!playlist.isEmpty()) {
+                        // Load first image
+                        currentPlaylistIndex = 0;
+                        saveAndLoad(playlist.get(0));
+                    } else {
+                        Toast.makeText(MainActivity.this, R.string.msg_no_images, Toast.LENGTH_SHORT).show();
+                    }
+                });
+            } catch (Exception e) {
+                Log.e(TAG, "Error during scan: " + e.getMessage(), e);
+                new Handler(Looper.getMainLooper()).post(() -> {
+                    isScanning = false;
+                    progressBar.setVisibility(View.GONE);
+                    Toast.makeText(MainActivity.this, "Scan error: " + e.getMessage(), Toast.LENGTH_SHORT).show();
+                });
+            }
         }).start();
     }
 
     private void scanDirectory(File dir) {
-        File[] files = dir.listFiles();
-        if (files == null) return;
+        if (dir == null || !dir.exists() || !dir.isDirectory()) {
+            return;
+        }
         
-        for (File file : files) {
-            if (file.isDirectory()) {
-                scanDirectory(file);
-            } else {
-                String name = file.getName().toLowerCase();
-                if (name.endsWith(".jpg") || name.endsWith(".jpeg") || 
-                    name.endsWith(".png") || name.endsWith(".bmp") || 
-                    name.endsWith(".webp")) {
-                    playlist.add(Uri.fromFile(file).toString());
+        try {
+            File[] files = dir.listFiles();
+            if (files == null) return;
+            
+            for (File file : files) {
+                if (file.isDirectory() && !file.isHidden()) {
+                    scanDirectory(file); // Recursive scan
+                } else if (file.isFile() && !file.isHidden()) {
+                    String name = file.getName().toLowerCase();
+                    if (isImageFile(name)) {
+                        try {
+                            Uri uri = Uri.fromFile(file);
+                            playlist.add(uri.toString());
+                        } catch (Exception e) {
+                            Log.w(TAG, "Failed to add file: " + file.getPath(), e);
+                        }
+                    }
                 }
             }
+        } catch (Exception e) {
+            Log.w(TAG, "Error scanning directory: " + dir.getPath(), e);
         }
+    }
+    
+    private boolean isImageFile(String filename) {
+        return filename.endsWith(".jpg") || filename.endsWith(".jpeg") || 
+               filename.endsWith(".png") || filename.endsWith(".bmp") || 
+               filename.endsWith(".webp") || filename.endsWith(".gif");
+    }
+    
+    @Override
+    public boolean onKeyDown(int keyCode, KeyEvent event) {
+        // Car-optimized keyboard controls
+        switch (keyCode) {
+            // Navigation
+            case KeyEvent.KEYCODE_DPAD_LEFT:
+            case KeyEvent.KEYCODE_MEDIA_PREVIOUS:
+                loadPreviousImage();
+                return true;
+            
+            case KeyEvent.KEYCODE_DPAD_RIGHT:
+            case KeyEvent.KEYCODE_MEDIA_NEXT:
+                loadNextImage();
+                return true;
+            
+            case KeyEvent.KEYCODE_DPAD_CENTER:
+            case KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE:
+                toggleMode();
+                return true;
+            
+            // Brightness control (Volume keys)
+            case KeyEvent.KEYCODE_VOLUME_UP:
+                adjustBrightness(0.1f);
+                return true;
+            
+            case KeyEvent.KEYCODE_VOLUME_DOWN:
+                adjustBrightness(-0.1f);
+                return true;
+            
+            // Menu control
+            case KeyEvent.KEYCODE_MENU:
+                toggleConfig();
+                return true;
+            
+            case KeyEvent.KEYCODE_BACK:
+                if (configPanel.getVisibility() == View.VISIBLE) {
+                    toggleConfig();
+                    return true;
+                }
+                break;
+            
+            default:
+                return super.onKeyDown(keyCode, event);
+        }
+        return super.onKeyDown(keyCode, event);
+    }
+    
+    private void adjustBrightness(float delta) {
+        float currentLevel = isMode2 ? mode2Level : mode1Level;
+        currentLevel = clamp(currentLevel + delta);
+        
+        if (isMode2) {
+            mode2Level = currentLevel;
+        } else {
+            mode1Level = currentLevel;
+        }
+        
+        applyBrightness(currentLevel);
+        showBrightnessIndicator();
+    }
+    
+    private void showBrightnessIndicator() {
+        brightnessIndicator.setVisibility(View.VISIBLE);
+        updateBrightnessIndicator(isMode2 ? mode2Level : mode1Level);
+        
+        // Auto-hide after 2 seconds
+        brightnessIndicator.postDelayed(() -> {
+            if (brightnessIndicator.getVisibility() == View.VISIBLE && !isAdjustingMode) {
+                brightnessIndicator.setVisibility(View.GONE);
+            }
+        }, 2000);
+    }
+    
+    private void updateBrightnessIndicator(float level) {
+        int percentage = (int)(level * 100);
+        brightnessBar.setProgress(percentage);
+        String modeText = isMode2 ? "Dark" : "Bright";
+        brightnessLabel.setText(String.format("%s Mode: %d%%", modeText, percentage));
+    }
+    
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+        
+        // Cancel any ongoing animations
+        if (brightnessAnimator != null && brightnessAnimator.isRunning()) {
+            brightnessAnimator.cancel();
+        }
+        if (configPanelAnimator != null && configPanelAnimator.isRunning()) {
+            configPanelAnimator.cancel();
+        }
+        
+        // Clear Glide memory
+        try {
+            Glide.get(this).clearMemory();
+        } catch (Exception e) {
+            Log.w(TAG, "Error clearing Glide memory: " + e.getMessage());
+        }
+        
+        // Save final state
+        savePosition();
+        
+        Log.i(TAG, "Activity destroyed, cleanup completed");
     }
 }
