@@ -52,22 +52,16 @@ import java.util.ArrayList;
 import java.util.List;
 
 import android.os.Environment;
-import android.os.Handler;
 import android.os.Looper;
-import android.provider.Settings;
 import android.view.KeyEvent;
 import java.io.File;
-import java.util.Arrays;
 import java.util.Collections;
-import java.util.Comparator;
 import java.util.HashSet;
 import java.util.Set;
 
 import android.view.ScaleGestureDetector;
 import android.animation.ValueAnimator;
-import android.animation.ObjectAnimator;
 import android.view.animation.DecelerateInterpolator;
-import android.view.animation.AccelerateDecelerateInterpolator;
 
 public class MainActivity extends AppCompatActivity {
 
@@ -76,6 +70,8 @@ public class MainActivity extends AppCompatActivity {
     private static final String KEY_URI_PRIVATE = "last_image_uri_private";
     private static final String KEY_HISTORY_PUBLIC = "history_public";
     private static final String KEY_HISTORY_PRIVATE = "history_private";
+    private static final String KEY_IS_PRIVATE_MODE = "is_private_mode";
+    private static final float MAX_SCALE_MULTIPLIER = 4.0f;
     private static final String TAG = "CarPicViewer";
     private static final int MAX_HISTORY = 10;
 
@@ -126,15 +122,13 @@ public class MainActivity extends AppCompatActivity {
     private int screenHeight;
     private Matrix currentMatrix = new Matrix();
     private String currentUriString;
+    private float baseScale = 1.0f;
     
     // Animation state
     private ValueAnimator brightnessAnimator;
-    private ValueAnimator configPanelAnimator;
-    
-    // Screen timeout
-    private static final long SCREEN_TIMEOUT_DELAY = 120000; // 2 minutes
-    private Handler screenTimeoutHandler;
-    private Runnable screenTimeoutRunnable;
+
+    // Gesture state helpers
+    private boolean imageChangedThisGesture = false;
 
     private final ActivityResultLauncher<Intent> filePickerLauncher =
             registerForActivityResult(new ActivityResultContracts.StartActivityForResult(), result -> {
@@ -186,28 +180,18 @@ public class MainActivity extends AppCompatActivity {
         
         touchSlop = 24; // Hardcoded to avoid context issues
         
-        // Load saved levels
+        // Load saved levels and modes
         SharedPreferences prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
         mode1Level = prefs.getFloat("mode1_level", 0.8f);
         mode2Level = prefs.getFloat("mode2_level", 0.2f);
         isMode2 = prefs.getBoolean("is_mode2", false);
+        isPrivateMode = prefs.getBoolean(KEY_IS_PRIVATE_MODE, false);
         
         // Apply initial brightness
         applyBrightness(isMode2 ? mode2Level : mode1Level);
         
         setupGestures();
         hideSystemUI();
-        
-        // Initialize screen timeout handler
-        screenTimeoutHandler = new Handler(Looper.getMainLooper());
-        screenTimeoutRunnable = () -> {
-            // Dim the screen (turn on black overlay)
-            if (blackOverlay.getVisibility() != View.VISIBLE && !isMode2) {
-                isMode2 = true;
-                applyBrightness(0.05f); // Very dim
-                showModeToast("Display Locked - Press Power to wake");
-            }
-        };
         
         // Setup car navigation buttons
         btnPrevious.setOnClickListener(v -> loadPreviousImage());
@@ -228,12 +212,8 @@ public class MainActivity extends AppCompatActivity {
             if(!url.isEmpty()) saveAndLoad(url);
         });
 
-        // Always start in public mode
-        String last = prefs.getString(KEY_URI_PUBLIC, null);
-        if (last != null) {
-            currentUriString = last;
-            loadImage(last);
-        }
+        // Restore last image according to current (public/private) mode
+        restoreLastImageForCurrentMode(prefs);
     }
     
     @Override
@@ -322,9 +302,11 @@ public class MainActivity extends AppCompatActivity {
                 if (Math.abs(diffX) > 100) { // Minimum distance
                     if (diffX > 0) {
                         // Swipe right -> Previous image
+                        imageChangedThisGesture = true;
                         loadPreviousImage();
                     } else {
                         // Swipe left -> Next image
+                        imageChangedThisGesture = true;
                         loadNextImage();
                     }
                     return true;
@@ -338,6 +320,21 @@ public class MainActivity extends AppCompatActivity {
             @Override
             public boolean onScale(ScaleGestureDetector detector) {
                 float scaleFactor = detector.getScaleFactor();
+
+                float[] values = new float[9];
+                currentMatrix.getValues(values);
+                float currentScale = values[Matrix.MSCALE_X];
+
+                float minScale = baseScale;
+                float maxScale = baseScale * MAX_SCALE_MULTIPLIER;
+                float targetScale = currentScale * scaleFactor;
+
+                if (targetScale < minScale) {
+                    scaleFactor = minScale / currentScale;
+                } else if (targetScale > maxScale) {
+                    scaleFactor = maxScale / currentScale;
+                }
+
                 currentMatrix.postScale(scaleFactor, scaleFactor, detector.getFocusX(), detector.getFocusY());
                 checkBoundsAndFix();
                 imageView.setImageMatrix(currentMatrix);
@@ -358,6 +355,7 @@ public class MainActivity extends AppCompatActivity {
                     startY = event.getY();
                     isAdjustingMode = false;
                     isZoomingOrPanning = false;
+                    imageChangedThisGesture = false;
                     break;
                     
                 case MotionEvent.ACTION_POINTER_DOWN:
@@ -467,7 +465,9 @@ public class MainActivity extends AppCompatActivity {
                 case MotionEvent.ACTION_CANCEL:
                     isAdjustingMode = false;
                     isZoomingOrPanning = false;
-                    savePosition();
+                    if (!imageChangedThisGesture) {
+                        savePosition();
+                    }
                     break;
             }
             return true;
@@ -549,15 +549,6 @@ public class MainActivity extends AppCompatActivity {
         }
     }
     
-    private void updateBrightnessIndicator(float level) {
-        brightnessBar.setProgress((int)(level * 100));
-        if (isMode2) {
-            brightnessLabel.setText(String.format("Dark Mode: %d%%", (int)(level * 100)));
-        } else {
-            brightnessLabel.setText(String.format("Bright Mode: %d%%", (int)(level * 100)));
-        }
-    }
-
     private void toggleMode() {
         isMode2 = !isMode2;
         applyBrightness(isMode2 ? mode2Level : mode1Level, true); // Animate!
@@ -593,6 +584,7 @@ public class MainActivity extends AppCompatActivity {
         if (displayW < screenWidth) {
             float fixScale = screenWidth / (float)imgW;
             currentMatrix.setScale(fixScale, fixScale);
+            baseScale = fixScale;
             // Re-get values after reset
             currentMatrix.getValues(values);
             transX = values[Matrix.MTRANS_X];
@@ -640,31 +632,54 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void togglePrivateMode() {
+        // Flip mode and persist it
         isPrivateMode = !isPrivateMode;
+        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+        prefs.edit().putBoolean(KEY_IS_PRIVATE_MODE, isPrivateMode).apply();
+
         String modeName = isPrivateMode ? "Private Mode" : "Public Mode";
         Toast.makeText(this, "Switched to " + modeName, Toast.LENGTH_SHORT).show();
-        
-        // Clear current playlist and reload history for the new mode
+
+        // Restore image for the newly selected mode
+        restoreLastImageForCurrentMode(prefs);
+    }
+
+    /**
+     * Restore the last image and playlist for the current public/private mode.
+     * Preference order:
+     *   1. Latest entry in mode-specific history
+     *   2. Fallback to mode-specific last URI key
+     *   3. Clear image if nothing is available
+     */
+    private void restoreLastImageForCurrentMode(SharedPreferences prefs) {
+        // Reset playlist for the current mode
         playlist.clear();
         currentPlaylistIndex = -1;
-        
-        // Load history
-        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
-        String key = isPrivateMode ? KEY_HISTORY_PRIVATE : KEY_HISTORY_PUBLIC;
-        String jsonString = prefs.getString(key, "[]");
+
+        // Try history first
+        String historyKey = isPrivateMode ? KEY_HISTORY_PRIVATE : KEY_HISTORY_PUBLIC;
+        String jsonString = prefs.getString(historyKey, "[]");
         try {
             JSONArray jsonArray = new JSONArray(jsonString);
             if (jsonArray.length() > 0) {
                 String last = jsonArray.getString(0);
-                saveAndLoad(last); // This will reload playlist from history
-            } else {
-                // No history in this mode
-                imageView.setImageDrawable(null);
-                currentUriString = null;
-                refreshHistoryUI();
+                saveAndLoad(last); // This will also rebuild playlist and history state
+                return;
             }
         } catch (JSONException e) {
             e.printStackTrace();
+        }
+
+        // Fallback to simple last-uri key if history is empty or invalid
+        String uriKey = isPrivateMode ? KEY_URI_PRIVATE : KEY_URI_PUBLIC;
+        String last = prefs.getString(uriKey, null);
+        if (last != null) {
+            saveAndLoad(last);
+        } else {
+            // No data for this mode
+            imageView.setImageDrawable(null);
+            currentUriString = null;
+            refreshHistoryUI();
         }
     }
     
@@ -674,6 +689,7 @@ public class MainActivity extends AppCompatActivity {
             return;
         }
         
+        savePosition();
         currentPlaylistIndex = (currentPlaylistIndex + 1) % playlist.size();
         saveAndLoad(playlist.get(currentPlaylistIndex));
         Toast.makeText(this, String.format("Image %d/%d", currentPlaylistIndex + 1, playlist.size()), Toast.LENGTH_SHORT).show();
@@ -685,6 +701,7 @@ public class MainActivity extends AppCompatActivity {
             return;
         }
         
+        savePosition();
         currentPlaylistIndex = (currentPlaylistIndex - 1 + playlist.size()) % playlist.size();
         saveAndLoad(playlist.get(currentPlaylistIndex));
         Toast.makeText(this, String.format("Image %d/%d", currentPlaylistIndex + 1, playlist.size()), Toast.LENGTH_SHORT).show();
@@ -728,12 +745,13 @@ public class MainActivity extends AppCompatActivity {
             currentPlaylistIndex = 0;
         }
 
-        // Save current URI
+        // Save current URI and active mode
         currentUriString = uri;
         String key = isPrivateMode ? KEY_URI_PRIVATE : KEY_URI_PUBLIC;
         getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                 .edit()
                 .putString(key, uri)
+                .putBoolean(KEY_IS_PRIVATE_MODE, isPrivateMode)
                 .apply();
         
         // Add to history
@@ -901,6 +919,7 @@ public class MainActivity extends AppCompatActivity {
 
         // Initial scale: Fit Width
         float scale = (float) screenWidth / imgW;
+        baseScale = scale;
         currentMatrix.reset();
         currentMatrix.setScale(scale, scale);
         
@@ -1164,9 +1183,6 @@ public class MainActivity extends AppCompatActivity {
         // Cancel any ongoing animations
         if (brightnessAnimator != null && brightnessAnimator.isRunning()) {
             brightnessAnimator.cancel();
-        }
-        if (configPanelAnimator != null && configPanelAnimator.isRunning()) {
-            configPanelAnimator.cancel();
         }
         
         // Clear Glide memory
