@@ -79,18 +79,10 @@ public class MainActivity extends AppCompatActivity {
     private FrameLayout rootLayout;
     private ImageView imageView;
     private View blackOverlay;
+    private ProgressBar progressBar;
     private LinearLayout configPanel;
     private LinearLayout historyContainer;
-    private LinearLayout navBar;
     private EditText etUrl;
-    private ProgressBar progressBar;
-    private LinearLayout brightnessIndicator;
-    private ProgressBar brightnessBar;
-    private TextView brightnessLabel;
-    private Button btnPrevious;
-    private Button btnNext;
-    private Button btnToggleMode;
-    private Button btnConfig;
     
     private GestureDetector gestureDetector;
     private ScaleGestureDetector scaleGestureDetector;
@@ -159,20 +151,11 @@ public class MainActivity extends AppCompatActivity {
         rootLayout = findViewById(R.id.rootLayout);
         imageView = findViewById(R.id.imageView);
         blackOverlay = findViewById(R.id.blackOverlay);
+        progressBar = findViewById(R.id.loading);
         configPanel = findViewById(R.id.configPanel);
         historyContainer = findViewById(R.id.historyContainer);
-        navBar = findViewById(R.id.navBar);
         etUrl = findViewById(R.id.etUrl);
-        progressBar = findViewById(R.id.loading);
-        brightnessIndicator = findViewById(R.id.brightnessIndicator);
-        brightnessBar = findViewById(R.id.brightnessBar);
-        brightnessLabel = findViewById(R.id.brightnessLabel);
-        
-        btnPrevious = findViewById(R.id.btnPrevious);
-        btnNext = findViewById(R.id.btnNext);
-        btnToggleMode = findViewById(R.id.btnToggleMode);
-        btnConfig = findViewById(R.id.btnConfig);
-        
+
         Button btnLocal = findViewById(R.id.btnSelectLocal);
         Button btnUrl = findViewById(R.id.btnLoadUrl);
         Button btnScan = findViewById(R.id.btnScanDevice);
@@ -181,6 +164,16 @@ public class MainActivity extends AppCompatActivity {
         
         touchSlop = 24; // Hardcoded to avoid context issues
         
+        // Wire up config panel buttons
+        btnLocal.setOnClickListener(v -> openFilePicker());
+        btnScan.setOnClickListener(v -> startScan());
+        btnUrl.setOnClickListener(v -> {
+            String url = etUrl.getText().toString().trim();
+            if (!url.isEmpty()) {
+                saveAndLoad(url);
+            }
+        });
+
         // Load saved levels and modes
         SharedPreferences prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
         mode1Level = prefs.getFloat("mode1_level", 0.8f);
@@ -194,25 +187,6 @@ public class MainActivity extends AppCompatActivity {
         setupGestures();
         hideSystemUI();
         
-        // Setup car navigation buttons
-        btnPrevious.setOnClickListener(v -> loadPreviousImage());
-        btnNext.setOnClickListener(v -> loadNextImage());
-        btnToggleMode.setOnClickListener(v -> toggleMode());
-        btnConfig.setOnLongClickListener(v -> {
-            toggleNavBar();
-            return true;
-        });
-        btnConfig.setOnClickListener(v -> toggleConfig());
-
-        btnLocal.setOnClickListener(v -> openFilePicker());
-        
-        btnScan.setOnClickListener(v -> startScan());
-
-        btnUrl.setOnClickListener(v -> {
-            String url = etUrl.getText().toString().trim();
-            if(!url.isEmpty()) saveAndLoad(url);
-        });
-
         // Restore last image according to current (public/private) mode
         restoreLastImageForCurrentMode(prefs);
     }
@@ -277,20 +251,16 @@ public class MainActivity extends AppCompatActivity {
 
             @Override
             public boolean onSingleTapConfirmed(@NonNull MotionEvent e) {
-                if (configPanel.getVisibility() == View.VISIBLE) {
-                    toggleConfig(); // Close config if open
+                if (configPanel != null && configPanel.getVisibility() == View.VISIBLE) {
+                    toggleConfig();
                 } else {
-                    toggleMode(); // Toggle Mode 1/Mode 2
+                    toggleMode();
                 }
                 return true;
             }
             
             @Override
             public boolean onFling(@NonNull MotionEvent e1, @NonNull MotionEvent e2, float velocityX, float velocityY) {
-                if (configPanel.getVisibility() == View.VISIBLE) {
-                    return false; // Don't handle fling when config is open
-                }
-                
                 float diffX = e2.getX() - e1.getX();
                 float diffY = e2.getY() - e1.getY();
                 
@@ -680,7 +650,82 @@ public class MainActivity extends AppCompatActivity {
             // No data for this mode
             imageView.setImageDrawable(null);
             currentUriString = null;
+        }
+    }
+
+    private void toggleConfig() {
+        if (configPanel == null) return;
+        if (configPanel.getVisibility() == View.VISIBLE) {
+            configPanel.setVisibility(View.GONE);
+            hideSystemUI();
+        } else {
             refreshHistoryUI();
+            configPanel.setVisibility(View.VISIBLE);
+        }
+    }
+
+    private void refreshHistoryUI() {
+        if (historyContainer == null) return;
+
+        historyContainer.removeAllViews();
+        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+        String key = isPrivateMode ? KEY_HISTORY_PRIVATE : KEY_HISTORY_PUBLIC;
+        String jsonString = prefs.getString(key, "[]");
+
+        try {
+            JSONArray jsonArray = new JSONArray(jsonString);
+            if (jsonArray.length() == 0) {
+                TextView empty = new TextView(this);
+                empty.setText(R.string.history_empty);
+                empty.setTextColor(Color.GRAY);
+                empty.setPadding(0, 20, 0, 20);
+                empty.setGravity(Gravity.CENTER);
+                historyContainer.addView(empty);
+                return;
+            }
+
+            for (int i = 0; i < jsonArray.length(); i++) {
+                final String uri = jsonArray.getString(i);
+
+                // Format display text (filename or short url)
+                String displayText = uri;
+                try {
+                    Uri u = Uri.parse(uri);
+                    if (u.getScheme() != null && u.getScheme().startsWith("content")) {
+                        // Try to get last segment for content URIs
+                        String path = u.getLastPathSegment();
+                        if (path != null) {
+                            int split = path.lastIndexOf(':');
+                            if (split > -1) path = path.substring(split + 1);
+                            displayText = "Local Image: ..." + path;
+                        }
+                    }
+                } catch (Exception ignored) {}
+
+                TextView tv = new TextView(this);
+                tv.setText(displayText);
+                tv.setTextColor(Color.WHITE);
+                tv.setTextSize(14f);
+                tv.setPadding(16, 24, 16, 24);
+                tv.setBackgroundResource(android.R.drawable.list_selector_background);
+                tv.setMaxLines(1);
+                tv.setEllipsize(android.text.TextUtils.TruncateAt.MIDDLE);
+
+                tv.setOnClickListener(v -> saveAndLoad(uri));
+
+                historyContainer.addView(tv);
+
+                // Divider
+                if (i < jsonArray.length() - 1) {
+                    View divider = new View(this);
+                    divider.setLayoutParams(new LinearLayout.LayoutParams(
+                            LinearLayout.LayoutParams.MATCH_PARENT, 1));
+                    divider.setBackgroundColor(Color.parseColor("#44FFFFFF"));
+                    historyContainer.addView(divider);
+                }
+            }
+        } catch (JSONException e) {
+            e.printStackTrace();
         }
     }
     
@@ -709,25 +754,6 @@ public class MainActivity extends AppCompatActivity {
     }
 
 
-
-    private void toggleConfig() {
-        if (configPanel.getVisibility() == View.VISIBLE) {
-            configPanel.setVisibility(View.GONE);
-            hideSystemUI();
-        } else {
-            refreshHistoryUI();
-            configPanel.setVisibility(View.VISIBLE);
-        }
-    }
-    
-    private void toggleNavBar() {
-        if (navBar.getVisibility() == View.VISIBLE) {
-            navBar.setVisibility(View.GONE);
-        } else {
-            navBar.setVisibility(View.VISIBLE);
-            hideSystemUI();
-        }
-    }
 
     private void openFilePicker() {
         Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
@@ -759,7 +785,6 @@ public class MainActivity extends AppCompatActivity {
         addToHistory(uri);
         
         loadImage(uri);
-        configPanel.setVisibility(View.GONE);
         hideSystemUI();
     }
 
@@ -794,69 +819,7 @@ public class MainActivity extends AppCompatActivity {
         prefs.edit().putString(key, newArray.toString()).apply();
     }
 
-    private void refreshHistoryUI() {
-        historyContainer.removeAllViews();
-        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
-        String key = isPrivateMode ? KEY_HISTORY_PRIVATE : KEY_HISTORY_PUBLIC;
-        String jsonString = prefs.getString(key, "[]");
 
-        try {
-            JSONArray jsonArray = new JSONArray(jsonString);
-            if (jsonArray.length() == 0) {
-                TextView empty = new TextView(this);
-                empty.setText(R.string.history_empty);
-                empty.setTextColor(Color.GRAY);
-                empty.setPadding(0, 20, 0, 20);
-                empty.setGravity(Gravity.CENTER);
-                historyContainer.addView(empty);
-                return;
-            }
-
-            for (int i = 0; i < jsonArray.length(); i++) {
-                final String uri = jsonArray.getString(i);
-                
-                // Format display text (filename or short url)
-                String displayText = uri;
-                try {
-                    Uri u = Uri.parse(uri);
-                    if (u.getScheme() != null && u.getScheme().startsWith("content")) {
-                        // Try to get last segment for content URIs
-                        String path = u.getLastPathSegment();
-                        if (path != null) {
-                            // Clean up standard Android file picker IDs like "image:1234"
-                            int split = path.lastIndexOf(':');
-                            if (split > -1) path = path.substring(split + 1);
-                            displayText = "Local Image: ..." + path;
-                        }
-                    } 
-                } catch (Exception ignored) {}
-
-                TextView tv = new TextView(this);
-                tv.setText(displayText);
-                tv.setTextColor(Color.WHITE);
-                tv.setTextSize(14f);
-                tv.setPadding(16, 24, 16, 24);
-                tv.setBackgroundResource(android.R.drawable.list_selector_background);
-                tv.setMaxLines(1);
-                tv.setEllipsize(android.text.TextUtils.TruncateAt.MIDDLE);
-                
-                tv.setOnClickListener(v -> saveAndLoad(uri));
-                
-                historyContainer.addView(tv);
-                
-                // Divider
-                if (i < jsonArray.length() - 1) {
-                    View divider = new View(this);
-                    divider.setLayoutParams(new LinearLayout.LayoutParams(
-                            LinearLayout.LayoutParams.MATCH_PARENT, 1));
-                    divider.setBackgroundColor(Color.parseColor("#44FFFFFF"));
-                    historyContainer.addView(divider);
-                }
-            }
-        } catch (JSONException e) {
-            e.printStackTrace();
-        }
-    }
 
     private void loadImage(String uriString) {
         if (uriString == null || uriString.isEmpty()) {
@@ -1126,18 +1089,6 @@ public class MainActivity extends AppCompatActivity {
                 adjustBrightness(-0.1f);
                 return true;
             
-            // Menu control
-            case KeyEvent.KEYCODE_MENU:
-                toggleConfig();
-                return true;
-            
-            case KeyEvent.KEYCODE_BACK:
-                if (configPanel.getVisibility() == View.VISIBLE) {
-                    toggleConfig();
-                    return true;
-                }
-                break;
-            
             default:
                 return super.onKeyDown(keyCode, event);
         }
@@ -1155,26 +1106,14 @@ public class MainActivity extends AppCompatActivity {
         }
         
         applyBrightness(currentLevel);
-        showBrightnessIndicator();
     }
     
     private void showBrightnessIndicator() {
-        brightnessIndicator.setVisibility(View.VISIBLE);
-        updateBrightnessIndicator(isMode2 ? mode2Level : mode1Level);
-        
-        // Auto-hide after 2 seconds
-        brightnessIndicator.postDelayed(() -> {
-            if (brightnessIndicator.getVisibility() == View.VISIBLE && !isAdjustingMode) {
-                brightnessIndicator.setVisibility(View.GONE);
-            }
-        }, 2000);
+        // HUD removed — keep method for compatibility
     }
     
     private void updateBrightnessIndicator(float level) {
-        int percentage = (int)(level * 100);
-        brightnessBar.setProgress(percentage);
-        String modeText = isMode2 ? "Dark" : "Bright";
-        brightnessLabel.setText(String.format("%s Mode: %d%%", modeText, percentage));
+        // HUD removed — no-op
     }
     
     @Override
