@@ -54,20 +54,14 @@ import java.util.List;
 import android.os.Environment;
 import android.os.Handler;
 import android.os.Looper;
-import android.provider.Settings;
-import android.view.KeyEvent;
 import java.io.File;
-import java.util.Arrays;
 import java.util.Collections;
-import java.util.Comparator;
 import java.util.HashSet;
 import java.util.Set;
 
 import android.view.ScaleGestureDetector;
 import android.animation.ValueAnimator;
-import android.animation.ObjectAnimator;
 import android.view.animation.DecelerateInterpolator;
-import android.view.animation.AccelerateDecelerateInterpolator;
 
 public class MainActivity extends AppCompatActivity {
 
@@ -76,24 +70,18 @@ public class MainActivity extends AppCompatActivity {
     private static final String KEY_URI_PRIVATE = "last_image_uri_private";
     private static final String KEY_HISTORY_PUBLIC = "history_public";
     private static final String KEY_HISTORY_PRIVATE = "history_private";
+    private static final String KEY_IS_PRIVATE_MODE = "is_private_mode";
+    private static final float MAX_SCALE_MULTIPLIER = 4.0f;
     private static final String TAG = "CarPicViewer";
     private static final int MAX_HISTORY = 10;
 
     private FrameLayout rootLayout;
     private ImageView imageView;
     private View blackOverlay;
+    private ProgressBar progressBar;
     private LinearLayout configPanel;
     private LinearLayout historyContainer;
-    private LinearLayout navBar;
     private EditText etUrl;
-    private ProgressBar progressBar;
-    private LinearLayout brightnessIndicator;
-    private ProgressBar brightnessBar;
-    private TextView brightnessLabel;
-    private Button btnPrevious;
-    private Button btnNext;
-    private Button btnToggleMode;
-    private Button btnConfig;
     
     private GestureDetector gestureDetector;
     private ScaleGestureDetector scaleGestureDetector;
@@ -110,10 +98,12 @@ public class MainActivity extends AppCompatActivity {
     
 
     
-    // Two-finger triple tap state
-    private long lastTwoFingerDownTime = 0;
-    private int twoFingerTapCount = 0;
-    private static final long MULTI_TAP_TIMEOUT = 500;
+    // Tap handling
+    // Right half: single-tap 5 times within PRIVACY_TAP_INTERVAL to toggle privacy mode
+    private static final long PRIVACY_TAP_INTERVAL = 500;
+    private static final int PRIVACY_TAP_COUNT = 5;
+    private long lastPrivacyTapTime = 0;
+    private int privacyTapCount = 0;
 
     // Playlist State
     private List<String> playlist = new ArrayList<>();
@@ -126,15 +116,13 @@ public class MainActivity extends AppCompatActivity {
     private int screenHeight;
     private Matrix currentMatrix = new Matrix();
     private String currentUriString;
+    private float baseScale = 1.0f;
     
     // Animation state
     private ValueAnimator brightnessAnimator;
-    private ValueAnimator configPanelAnimator;
-    
-    // Screen timeout
-    private static final long SCREEN_TIMEOUT_DELAY = 120000; // 2 minutes
-    private Handler screenTimeoutHandler;
-    private Runnable screenTimeoutRunnable;
+
+    // Gesture state helpers
+    private boolean imageChangedThisGesture = false;
 
     private final ActivityResultLauncher<Intent> filePickerLauncher =
             registerForActivityResult(new ActivityResultContracts.StartActivityForResult(), result -> {
@@ -164,20 +152,11 @@ public class MainActivity extends AppCompatActivity {
         rootLayout = findViewById(R.id.rootLayout);
         imageView = findViewById(R.id.imageView);
         blackOverlay = findViewById(R.id.blackOverlay);
+        progressBar = findViewById(R.id.loading);
         configPanel = findViewById(R.id.configPanel);
         historyContainer = findViewById(R.id.historyContainer);
-        navBar = findViewById(R.id.navBar);
         etUrl = findViewById(R.id.etUrl);
-        progressBar = findViewById(R.id.loading);
-        brightnessIndicator = findViewById(R.id.brightnessIndicator);
-        brightnessBar = findViewById(R.id.brightnessBar);
-        brightnessLabel = findViewById(R.id.brightnessLabel);
-        
-        btnPrevious = findViewById(R.id.btnPrevious);
-        btnNext = findViewById(R.id.btnNext);
-        btnToggleMode = findViewById(R.id.btnToggleMode);
-        btnConfig = findViewById(R.id.btnConfig);
-        
+
         Button btnLocal = findViewById(R.id.btnSelectLocal);
         Button btnUrl = findViewById(R.id.btnLoadUrl);
         Button btnScan = findViewById(R.id.btnScanDevice);
@@ -186,11 +165,22 @@ public class MainActivity extends AppCompatActivity {
         
         touchSlop = 24; // Hardcoded to avoid context issues
         
-        // Load saved levels
+        // Wire up config panel buttons
+        btnLocal.setOnClickListener(v -> openFilePicker());
+        btnScan.setOnClickListener(v -> startScan());
+        btnUrl.setOnClickListener(v -> {
+            String url = etUrl.getText().toString().trim();
+            if (!url.isEmpty()) {
+                saveAndLoad(url);
+            }
+        });
+
+        // Load saved levels and modes
         SharedPreferences prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
         mode1Level = prefs.getFloat("mode1_level", 0.8f);
         mode2Level = prefs.getFloat("mode2_level", 0.2f);
         isMode2 = prefs.getBoolean("is_mode2", false);
+        isPrivateMode = prefs.getBoolean(KEY_IS_PRIVATE_MODE, false);
         
         // Apply initial brightness
         applyBrightness(isMode2 ? mode2Level : mode1Level);
@@ -198,42 +188,8 @@ public class MainActivity extends AppCompatActivity {
         setupGestures();
         hideSystemUI();
         
-        // Initialize screen timeout handler
-        screenTimeoutHandler = new Handler(Looper.getMainLooper());
-        screenTimeoutRunnable = () -> {
-            // Dim the screen (turn on black overlay)
-            if (blackOverlay.getVisibility() != View.VISIBLE && !isMode2) {
-                isMode2 = true;
-                applyBrightness(0.05f); // Very dim
-                showModeToast("Display Locked - Press Power to wake");
-            }
-        };
-        
-        // Setup car navigation buttons
-        btnPrevious.setOnClickListener(v -> loadPreviousImage());
-        btnNext.setOnClickListener(v -> loadNextImage());
-        btnToggleMode.setOnClickListener(v -> toggleMode());
-        btnConfig.setOnLongClickListener(v -> {
-            toggleNavBar();
-            return true;
-        });
-        btnConfig.setOnClickListener(v -> toggleConfig());
-
-        btnLocal.setOnClickListener(v -> openFilePicker());
-        
-        btnScan.setOnClickListener(v -> startScan());
-
-        btnUrl.setOnClickListener(v -> {
-            String url = etUrl.getText().toString().trim();
-            if(!url.isEmpty()) saveAndLoad(url);
-        });
-
-        // Always start in public mode
-        String last = prefs.getString(KEY_URI_PUBLIC, null);
-        if (last != null) {
-            currentUriString = last;
-            loadImage(last);
-        }
+        // Restore last image according to current (public/private) mode
+        restoreLastImageForCurrentMode(prefs);
     }
     
     @Override
@@ -290,85 +246,124 @@ public class MainActivity extends AppCompatActivity {
         gestureDetector = new GestureDetector(this, new GestureDetector.SimpleOnGestureListener() {
             @Override
             public boolean onDoubleTap(@NonNull MotionEvent e) {
-                // Only trigger if double-tap is on right half of the screen
-                if (e.getX() > screenWidth / 2) {
-                    loadNextImage();
-                }
+                toggleConfig();
                 return true;
             }
 
             @Override
             public boolean onSingleTapConfirmed(@NonNull MotionEvent e) {
-                if (configPanel.getVisibility() == View.VISIBLE) {
-                    toggleConfig(); // Close config if open
+                int width = rootLayout != null ? rootLayout.getWidth() : screenWidth;
+                float x = e.getX();
+                boolean isLeft = (width <= 0) || x < width / 2f;
+
+                if (isLeft) {
+                    if (configPanel != null && configPanel.getVisibility() == View.VISIBLE) {
+                        toggleConfig();
+                    } else {
+                        toggleMode();
+                    }
                 } else {
-                    toggleMode(); // Toggle Mode 1/Mode 2
+                    long now = System.currentTimeMillis();
+                    if (now - lastPrivacyTapTime > PRIVACY_TAP_INTERVAL) {
+                        privacyTapCount = 0;
+                    }
+                    privacyTapCount++;
+                    lastPrivacyTapTime = now;
+                    if (privacyTapCount >= PRIVACY_TAP_COUNT) {
+                        privacyTapCount = 0;
+                        togglePrivateMode();
+                    }
                 }
                 return true;
             }
             
-            // ...existing code...
-        });
-
-        scaleGestureDetector = new ScaleGestureDetector(this, new ScaleGestureDetector.SimpleOnScaleGestureListener() {
             @Override
-            public boolean onScale(ScaleGestureDetector detector) {
-                float scaleFactor = detector.getScaleFactor();
-                currentMatrix.postScale(scaleFactor, scaleFactor, detector.getFocusX(), detector.getFocusY());
-                checkBoundsAndFix();
-                imageView.setImageMatrix(currentMatrix);
-                return true;
+            public boolean onFling(@NonNull MotionEvent e1, @NonNull MotionEvent e2, float velocityX, float velocityY) {
+                if (configPanel.getVisibility() == View.VISIBLE) {
+                    return false; // Don't handle fling when config is open
+                }
+                
+                float diffX = e2.getX() - e1.getX();
+                float diffY = e2.getY() - e1.getY();
+                
+                // If vertical movement, ignore (handle panning/zooming)
+                if (Math.abs(diffY) > Math.abs(diffX)) {
+                    return false;
+                }
+                
+                // Horizontal swipe
+                if (Math.abs(diffX) > 100) { // Minimum distance
+                    if (diffX > 0) {
+                        // Swipe right -> Previous image
+                        loadPreviousImage();
+                    } else {
+                        // Swipe left -> Next image
+                        loadNextImage();
+                    }
+                    return true;
+                }
+                
+                return false;
             }
         });
 
-        rootLayout.setOnTouchListener((v, event) -> {
-            scaleGestureDetector.onTouchEvent(event);
-            gestureDetector.onTouchEvent(event);
-            
-            int action = event.getActionMasked();
-            int pointerCount = event.getPointerCount();
+        gestureDetector = new GestureDetector(this, new GestureDetector.SimpleOnGestureListener() {
+            @Override
+            public boolean onDoubleTap(@NonNull MotionEvent e) {
+                toggleConfig();
+                return true;
+            }
+            @Override
+            public boolean onSingleTapConfirmed(@NonNull MotionEvent e) {
+                int width = rootLayout != null ? rootLayout.getWidth() : screenWidth;
+                float x = e.getX();
+                boolean isLeft = (width <= 0) || x < width / 2f;
 
-            switch (action) {
-                case MotionEvent.ACTION_DOWN:
-                    startX = event.getX();
-                    startY = event.getY();
-                    isAdjustingMode = false;
-                    isZoomingOrPanning = false;
-                    break;
-                    
-                case MotionEvent.ACTION_POINTER_DOWN:
-                    if (pointerCount == 2) {
-                        long now = System.currentTimeMillis();
-                        if (now - lastTwoFingerDownTime < MULTI_TAP_TIMEOUT) {
-                            twoFingerTapCount++;
-                        } else {
-                            twoFingerTapCount = 1;
-                        }
-                        lastTwoFingerDownTime = now;
-                        
-                        if (twoFingerTapCount == 3) {
-                            togglePrivateMode();
-                            twoFingerTapCount = 0;
-                        }
-                        
-                        isZoomingOrPanning = true;
-                        isAdjustingMode = false; // Cancel single finger
-                        startX = (event.getX(0) + event.getX(1)) / 2;
-                        startY = (event.getY(0) + event.getY(1)) / 2;
+                if (isLeft) {
+                    if (configPanel != null && configPanel.getVisibility() == View.VISIBLE) {
+                        toggleConfig();
+                    } else {
+                        toggleMode();
                     }
-                    break;
-                
-                case MotionEvent.ACTION_POINTER_UP:
-                    // If we were zooming, keep isZoomingOrPanning true so we don't switch to brightness
-                    if (pointerCount - 1 < 2) {
-                        // Dropping to 1 finger
-                        // Update startX/Y to prevent jump if we were panning?
-                        // But we are ignoring moves anyway if isZoomingOrPanning is true.
+                } else {
+                    long now = System.currentTimeMillis();
+                    if (now - lastPrivacyTapTime > PRIVACY_TAP_INTERVAL) {
+                        privacyTapCount = 0;
                     }
-                    break;
-
-                case MotionEvent.ACTION_MOVE:
-                    if (scaleGestureDetector.isInProgress()) {
+                    privacyTapCount++;
+                    lastPrivacyTapTime = now;
+                    if (privacyTapCount >= PRIVACY_TAP_COUNT) {
+                        privacyTapCount = 0;
+                        togglePrivateMode();
+                    }
+                }
+                return true;
+            }
+            @Override
+            public boolean onFling(@NonNull MotionEvent e1, @NonNull MotionEvent e2, float velocityX, float velocityY) {
+                if (configPanel.getVisibility() == View.VISIBLE) {
+                    return false; // Don't handle fling when config is open
+                }
+                float diffX = e2.getX() - e1.getX();
+                float diffY = e2.getY() - e1.getY();
+                // If vertical movement, ignore (handle panning/zooming)
+                if (Math.abs(diffY) > Math.abs(diffX)) {
+                    return false;
+                }
+                // Horizontal swipe
+                if (Math.abs(diffX) > 100) { // Minimum distance
+                    if (diffX > 0) {
+                        // Swipe right -> Previous image
+                        loadPreviousImage();
+                    } else {
+                        // Swipe left -> Next image
+                        loadNextImage();
+                    }
+                    return true;
+                }
+                return false;
+            }
+        });
                         isZoomingOrPanning = true;
                         isAdjustingMode = false;
                     } 
@@ -443,7 +438,9 @@ public class MainActivity extends AppCompatActivity {
                 case MotionEvent.ACTION_CANCEL:
                     isAdjustingMode = false;
                     isZoomingOrPanning = false;
-                    savePosition();
+                    if (!imageChangedThisGesture) {
+                        savePosition();
+                    }
                     break;
             }
             return true;
@@ -525,15 +522,6 @@ public class MainActivity extends AppCompatActivity {
         }
     }
     
-    private void updateBrightnessIndicator(float level) {
-        brightnessBar.setProgress((int)(level * 100));
-        if (isMode2) {
-            brightnessLabel.setText(String.format("Dark Mode: %d%%", (int)(level * 100)));
-        } else {
-            brightnessLabel.setText(String.format("Bright Mode: %d%%", (int)(level * 100)));
-        }
-    }
-
     private void toggleMode() {
         isMode2 = !isMode2;
         applyBrightness(isMode2 ? mode2Level : mode1Level, true); // Animate!
@@ -569,6 +557,7 @@ public class MainActivity extends AppCompatActivity {
         if (displayW < screenWidth) {
             float fixScale = screenWidth / (float)imgW;
             currentMatrix.setScale(fixScale, fixScale);
+            baseScale = fixScale;
             // Re-get values after reset
             currentMatrix.getValues(values);
             transX = values[Matrix.MTRANS_X];
@@ -616,28 +605,178 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void togglePrivateMode() {
+        // Flip mode and persist it
         isPrivateMode = !isPrivateMode;
+        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+        prefs.edit().putBoolean(KEY_IS_PRIVATE_MODE, isPrivateMode).apply();
+
         String modeName = isPrivateMode ? "Private Mode" : "Public Mode";
         Toast.makeText(this, "Switched to " + modeName, Toast.LENGTH_SHORT).show();
-        
-        // Clear current playlist and reload history for the new mode
+
+        // Restore image for the newly selected mode
+        restoreLastImageForCurrentMode(prefs);
+    }
+
+    /**
+     * Restore the last image and playlist for the current public/private mode.
+     * Preference order:
+     *   1. Latest entry in mode-specific history
+     *   2. Fallback to mode-specific last URI key
+     *   3. Clear image if nothing is available
+     */
+    private void restoreLastImageForCurrentMode(SharedPreferences prefs) {
+        // Reset playlist for the current mode
         playlist.clear();
         currentPlaylistIndex = -1;
-        
-        // Load history
-        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
-        String key = isPrivateMode ? KEY_HISTORY_PRIVATE : KEY_HISTORY_PUBLIC;
-        String jsonString = prefs.getString(key, "[]");
+
+        // Try history first
+        String historyKey = isPrivateMode ? KEY_HISTORY_PRIVATE : KEY_HISTORY_PUBLIC;
+        String jsonString = prefs.getString(historyKey, "[]");
         try {
             JSONArray jsonArray = new JSONArray(jsonString);
             if (jsonArray.length() > 0) {
                 String last = jsonArray.getString(0);
-                saveAndLoad(last); // This will reload playlist from history
-            } else {
-                // No history in this mode
-                imageView.setImageDrawable(null);
-                currentUriString = null;
-                refreshHistoryUI();
+                saveAndLoad(last); // This will also rebuild playlist and history state
+                return;
+            }
+        } catch (JSONException e) {
+            e.printStackTrace();
+        }
+
+        // Fallback to simple last-uri key if history is empty or invalid
+        String uriKey = isPrivateMode ? KEY_URI_PRIVATE : KEY_URI_PUBLIC;
+        String last = prefs.getString(uriKey, null);
+        if (last != null) {
+            saveAndLoad(last);
+        } else {
+            // No data for this mode
+            imageView.setImageDrawable(null);
+            currentUriString = null;
+        }
+    }
+
+    private void toggleConfig() {
+        if (configPanel == null) return;
+        if (configPanel.getVisibility() == View.VISIBLE) {
+            configPanel.setVisibility(View.GONE);
+            hideSystemUI();
+        } else {
+            refreshHistoryUI();
+            configPanel.setVisibility(View.VISIBLE);
+        }
+    }
+
+    private void refreshHistoryUI() {
+        if (historyContainer == null) return;
+
+        historyContainer.removeAllViews();
+        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+        String key = isPrivateMode ? KEY_HISTORY_PRIVATE : KEY_HISTORY_PUBLIC;
+        String jsonString = prefs.getString(key, "[]");
+
+        try {
+            JSONArray jsonArray = new JSONArray(jsonString);
+            if (jsonArray.length() == 0) {
+                TextView empty = new TextView(this);
+                empty.setText(R.string.history_empty);
+                empty.setTextColor(Color.parseColor("#757575"));
+                empty.setPadding(0, 16, 0, 16);
+                empty.setGravity(Gravity.CENTER);
+                historyContainer.addView(empty);
+                return;
+            }
+
+            int thumbSize = (int) (48 * getResources().getDisplayMetrics().density);
+
+            for (int i = 0; i < jsonArray.length(); i++) {
+                final String uri = jsonArray.getString(i);
+
+                // Format display text (filename or short url)
+                String displayText = uri;
+                try {
+                    Uri u = Uri.parse(uri);
+                    if (u.getScheme() != null && u.getScheme().startsWith("content")) {
+                        // Try to get last segment for content URIs
+                        String path = u.getLastPathSegment();
+                        if (path != null) {
+                            int split = path.lastIndexOf(':');
+                            if (split > -1) path = path.substring(split + 1);
+                            displayText = "Local Image: ..." + path;
+                        }
+                    }
+                } catch (Exception ignored) {}
+
+                // Row: thumbnail + text
+                LinearLayout row = new LinearLayout(this);
+                row.setOrientation(LinearLayout.HORIZONTAL);
+                row.setLayoutParams(new LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT));
+                row.setPadding(12, 8, 12, 8);
+                row.setBackgroundResource(android.R.drawable.list_selector_background);
+
+                ImageView thumb = new ImageView(this);
+                LinearLayout.LayoutParams thumbLp = new LinearLayout.LayoutParams(thumbSize, thumbSize);
+                thumbLp.setMarginEnd(12);
+                thumb.setLayoutParams(thumbLp);
+                thumb.setScaleType(ImageView.ScaleType.CENTER_CROP);
+
+                try {
+                    Glide.with(this)
+                            .load(Uri.parse(uri))
+                            .apply(new RequestOptions()
+                                    .centerCrop()
+                                    .override(thumbSize, thumbSize))
+                            .into(thumb);
+                } catch (Exception ignored) {}
+
+                TextView tv = new TextView(this);
+                LinearLayout.LayoutParams tvLp = new LinearLayout.LayoutParams(
+                        0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+                tv.setLayoutParams(tvLp);
+                tv.setText(displayText);
+                tv.setTextColor(Color.parseColor("#1A1A1A"));
+                tv.setTextSize(13f);
+                tv.setMaxLines(1);
+                tv.setEllipsize(android.text.TextUtils.TruncateAt.MIDDLE);
+
+                row.addView(thumb);
+                row.addView(tv);
+
+                // Tap to load this image
+                row.setOnClickListener(v -> saveAndLoad(uri));
+
+                // Long press to delete this history entry
+                row.setOnLongClickListener(v -> {
+                    try {
+                        String raw = prefs.getString(key, "[]");
+                        JSONArray arr = new JSONArray(raw);
+                        List<String> list = new ArrayList<>();
+                        for (int idx = 0; idx < arr.length(); idx++) {
+                            String item = arr.getString(idx);
+                            if (!item.equals(uri)) {
+                                list.add(item);
+                            }
+                        }
+                        JSONArray newArr = new JSONArray(list);
+                        prefs.edit().putString(key, newArr.toString()).apply();
+                        Toast.makeText(this, "Removed from history", Toast.LENGTH_SHORT).show();
+                        refreshHistoryUI();
+                    } catch (JSONException ex) {
+                        ex.printStackTrace();
+                    }
+                    return true;
+                });
+
+                historyContainer.addView(row);
+
+                if (i < jsonArray.length() - 1) {
+                    View divider = new View(this);
+                    divider.setLayoutParams(new LinearLayout.LayoutParams(
+                            LinearLayout.LayoutParams.MATCH_PARENT, 1));
+                    divider.setBackgroundColor(Color.parseColor("#DDDDDD"));
+                    historyContainer.addView(divider);
+                }
             }
         } catch (JSONException e) {
             e.printStackTrace();
@@ -650,6 +789,7 @@ public class MainActivity extends AppCompatActivity {
             return;
         }
         
+        savePosition();
         currentPlaylistIndex = (currentPlaylistIndex + 1) % playlist.size();
         saveAndLoad(playlist.get(currentPlaylistIndex));
         Toast.makeText(this, String.format("Image %d/%d", currentPlaylistIndex + 1, playlist.size()), Toast.LENGTH_SHORT).show();
@@ -661,31 +801,13 @@ public class MainActivity extends AppCompatActivity {
             return;
         }
         
+        savePosition();
         currentPlaylistIndex = (currentPlaylistIndex - 1 + playlist.size()) % playlist.size();
         saveAndLoad(playlist.get(currentPlaylistIndex));
         Toast.makeText(this, String.format("Image %d/%d", currentPlaylistIndex + 1, playlist.size()), Toast.LENGTH_SHORT).show();
     }
 
 
-
-    private void toggleConfig() {
-        if (configPanel.getVisibility() == View.VISIBLE) {
-            configPanel.setVisibility(View.GONE);
-            hideSystemUI();
-        } else {
-            refreshHistoryUI();
-            configPanel.setVisibility(View.VISIBLE);
-        }
-    }
-    
-    private void toggleNavBar() {
-        if (navBar.getVisibility() == View.VISIBLE) {
-            navBar.setVisibility(View.GONE);
-        } else {
-            navBar.setVisibility(View.VISIBLE);
-            hideSystemUI();
-        }
-    }
 
     private void openFilePicker() {
         Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
@@ -695,6 +817,9 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void saveAndLoad(String uri) {
+        if (configPanel != null) {
+            configPanel.setVisibility(View.GONE);
+        }
         // Update playlist index if loading manually
         if (playlist.contains(uri)) {
             currentPlaylistIndex = playlist.indexOf(uri);
@@ -704,19 +829,19 @@ public class MainActivity extends AppCompatActivity {
             currentPlaylistIndex = 0;
         }
 
-        // Save current URI
+        // Save current URI and active mode
         currentUriString = uri;
         String key = isPrivateMode ? KEY_URI_PRIVATE : KEY_URI_PUBLIC;
         getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                 .edit()
                 .putString(key, uri)
+                .putBoolean(KEY_IS_PRIVATE_MODE, isPrivateMode)
                 .apply();
         
         // Add to history
         addToHistory(uri);
         
         loadImage(uri);
-        configPanel.setVisibility(View.GONE);
         hideSystemUI();
     }
 
@@ -751,69 +876,7 @@ public class MainActivity extends AppCompatActivity {
         prefs.edit().putString(key, newArray.toString()).apply();
     }
 
-    private void refreshHistoryUI() {
-        historyContainer.removeAllViews();
-        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
-        String key = isPrivateMode ? KEY_HISTORY_PRIVATE : KEY_HISTORY_PUBLIC;
-        String jsonString = prefs.getString(key, "[]");
 
-        try {
-            JSONArray jsonArray = new JSONArray(jsonString);
-            if (jsonArray.length() == 0) {
-                TextView empty = new TextView(this);
-                empty.setText(R.string.history_empty);
-                empty.setTextColor(Color.GRAY);
-                empty.setPadding(0, 20, 0, 20);
-                empty.setGravity(Gravity.CENTER);
-                historyContainer.addView(empty);
-                return;
-            }
-
-            for (int i = 0; i < jsonArray.length(); i++) {
-                final String uri = jsonArray.getString(i);
-                
-                // Format display text (filename or short url)
-                String displayText = uri;
-                try {
-                    Uri u = Uri.parse(uri);
-                    if (u.getScheme() != null && u.getScheme().startsWith("content")) {
-                        // Try to get last segment for content URIs
-                        String path = u.getLastPathSegment();
-                        if (path != null) {
-                            // Clean up standard Android file picker IDs like "image:1234"
-                            int split = path.lastIndexOf(':');
-                            if (split > -1) path = path.substring(split + 1);
-                            displayText = "Local Image: ..." + path;
-                        }
-                    } 
-                } catch (Exception ignored) {}
-
-                TextView tv = new TextView(this);
-                tv.setText(displayText);
-                tv.setTextColor(Color.WHITE);
-                tv.setTextSize(14f);
-                tv.setPadding(16, 24, 16, 24);
-                tv.setBackgroundResource(android.R.drawable.list_selector_background);
-                tv.setMaxLines(1);
-                tv.setEllipsize(android.text.TextUtils.TruncateAt.MIDDLE);
-                
-                tv.setOnClickListener(v -> saveAndLoad(uri));
-                
-                historyContainer.addView(tv);
-                
-                // Divider
-                if (i < jsonArray.length() - 1) {
-                    View divider = new View(this);
-                    divider.setLayoutParams(new LinearLayout.LayoutParams(
-                            LinearLayout.LayoutParams.MATCH_PARENT, 1));
-                    divider.setBackgroundColor(Color.parseColor("#44FFFFFF"));
-                    historyContainer.addView(divider);
-                }
-            }
-        } catch (JSONException e) {
-            e.printStackTrace();
-        }
-    }
 
     private void loadImage(String uriString) {
         if (uriString == null || uriString.isEmpty()) {
@@ -877,6 +940,7 @@ public class MainActivity extends AppCompatActivity {
 
         // Initial scale: Fit Width
         float scale = (float) screenWidth / imgW;
+        baseScale = scale;
         currentMatrix.reset();
         currentMatrix.setScale(scale, scale);
         
@@ -1053,53 +1117,6 @@ public class MainActivity extends AppCompatActivity {
                filename.endsWith(".webp") || filename.endsWith(".gif");
     }
     
-    @Override
-    public boolean onKeyDown(int keyCode, KeyEvent event) {
-        // Car-optimized keyboard controls
-        switch (keyCode) {
-            // Navigation
-            case KeyEvent.KEYCODE_DPAD_LEFT:
-            case KeyEvent.KEYCODE_MEDIA_PREVIOUS:
-                loadPreviousImage();
-                return true;
-            
-            case KeyEvent.KEYCODE_DPAD_RIGHT:
-            case KeyEvent.KEYCODE_MEDIA_NEXT:
-                loadNextImage();
-                return true;
-            
-            case KeyEvent.KEYCODE_DPAD_CENTER:
-            case KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE:
-                toggleMode();
-                return true;
-            
-            // Brightness control (Volume keys)
-            case KeyEvent.KEYCODE_VOLUME_UP:
-                adjustBrightness(0.1f);
-                return true;
-            
-            case KeyEvent.KEYCODE_VOLUME_DOWN:
-                adjustBrightness(-0.1f);
-                return true;
-            
-            // Menu control
-            case KeyEvent.KEYCODE_MENU:
-                toggleConfig();
-                return true;
-            
-            case KeyEvent.KEYCODE_BACK:
-                if (configPanel.getVisibility() == View.VISIBLE) {
-                    toggleConfig();
-                    return true;
-                }
-                break;
-            
-            default:
-                return super.onKeyDown(keyCode, event);
-        }
-        return super.onKeyDown(keyCode, event);
-    }
-    
     private void adjustBrightness(float delta) {
         float currentLevel = isMode2 ? mode2Level : mode1Level;
         currentLevel = clamp(currentLevel + delta);
@@ -1111,26 +1128,14 @@ public class MainActivity extends AppCompatActivity {
         }
         
         applyBrightness(currentLevel);
-        showBrightnessIndicator();
     }
     
     private void showBrightnessIndicator() {
-        brightnessIndicator.setVisibility(View.VISIBLE);
-        updateBrightnessIndicator(isMode2 ? mode2Level : mode1Level);
-        
-        // Auto-hide after 2 seconds
-        brightnessIndicator.postDelayed(() -> {
-            if (brightnessIndicator.getVisibility() == View.VISIBLE && !isAdjustingMode) {
-                brightnessIndicator.setVisibility(View.GONE);
-            }
-        }, 2000);
+        // HUD removed — keep method for compatibility
     }
     
     private void updateBrightnessIndicator(float level) {
-        int percentage = (int)(level * 100);
-        brightnessBar.setProgress(percentage);
-        String modeText = isMode2 ? "Dark" : "Bright";
-        brightnessLabel.setText(String.format("%s Mode: %d%%", modeText, percentage));
+        // HUD removed — no-op
     }
     
     @Override
@@ -1140,9 +1145,6 @@ public class MainActivity extends AppCompatActivity {
         // Cancel any ongoing animations
         if (brightnessAnimator != null && brightnessAnimator.isRunning()) {
             brightnessAnimator.cancel();
-        }
-        if (configPanelAnimator != null && configPanelAnimator.isRunning()) {
-            configPanelAnimator.cancel();
         }
         
         // Clear Glide memory
