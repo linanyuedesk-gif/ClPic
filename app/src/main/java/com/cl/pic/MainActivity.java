@@ -54,7 +54,6 @@ import java.util.List;
 import android.os.Environment;
 import android.os.Handler;
 import android.os.Looper;
-import android.view.KeyEvent;
 import java.io.File;
 import java.util.Collections;
 import java.util.HashSet;
@@ -1058,41 +1057,6 @@ public class MainActivity extends AppCompatActivity {
         return filename.endsWith(".jpg") || filename.endsWith(".jpeg") || 
                filename.endsWith(".png") || filename.endsWith(".bmp") || 
                filename.endsWith(".webp") || filename.endsWith(".gif");
-    }
-    
-    @Override
-    public boolean onKeyDown(int keyCode, KeyEvent event) {
-        // Car-optimized keyboard controls
-        switch (keyCode) {
-            // Navigation
-            case KeyEvent.KEYCODE_DPAD_LEFT:
-            case KeyEvent.KEYCODE_MEDIA_PREVIOUS:
-                loadPreviousImage();
-                return true;
-            
-            case KeyEvent.KEYCODE_DPAD_RIGHT:
-            case KeyEvent.KEYCODE_MEDIA_NEXT:
-                loadNextImage();
-                return true;
-            
-            case KeyEvent.KEYCODE_DPAD_CENTER:
-            case KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE:
-                toggleMode();
-                return true;
-            
-            // Brightness control (Volume keys)
-            case KeyEvent.KEYCODE_VOLUME_UP:
-                adjustBrightness(0.1f);
-                return true;
-            
-            case KeyEvent.KEYCODE_VOLUME_DOWN:
-                adjustBrightness(-0.1f);
-                return true;
-            
-            default:
-                return super.onKeyDown(keyCode, event);
-        }
-        return super.onKeyDown(keyCode, event);
     }
     
     private void adjustBrightness(float delta) {
