@@ -98,10 +98,13 @@ public class MainActivity extends AppCompatActivity {
     
 
     
-    // Two-finger triple tap state
-    private long lastTwoFingerDownTime = 0;
-    private int twoFingerTapCount = 0;
+    // Single-tap 5 times for privacy mode
+    private long lastSingleTapTime = 0;
+    private int singleTapCount = 0;
     private static final long MULTI_TAP_TIMEOUT = 500;
+    private static final int PRIVACY_TAP_COUNT = 5;
+    private Handler mainHandler;
+    private Runnable pendingSingleTapRunnable;
 
     // Playlist State
     private List<String> playlist = new ArrayList<>();
@@ -183,6 +186,13 @@ public class MainActivity extends AppCompatActivity {
         // Apply initial brightness
         applyBrightness(isMode2 ? mode2Level : mode1Level);
         
+        mainHandler = new Handler(Looper.getMainLooper());
+        pendingSingleTapRunnable = () -> {
+            if (singleTapCount == 1) {
+                toggleMode();
+            }
+            singleTapCount = 0;
+        };
         setupGestures();
         hideSystemUI();
         
@@ -252,8 +262,24 @@ public class MainActivity extends AppCompatActivity {
             public boolean onSingleTapConfirmed(@NonNull MotionEvent e) {
                 if (configPanel != null && configPanel.getVisibility() == View.VISIBLE) {
                     toggleConfig();
-                } else {
-                    toggleMode();
+                    return true;
+                }
+                long now = System.currentTimeMillis();
+                if (mainHandler != null && pendingSingleTapRunnable != null) {
+                    mainHandler.removeCallbacks(pendingSingleTapRunnable);
+                }
+                if (now - lastSingleTapTime > MULTI_TAP_TIMEOUT) {
+                    singleTapCount = 0;
+                }
+                singleTapCount++;
+                lastSingleTapTime = now;
+                if (singleTapCount >= PRIVACY_TAP_COUNT) {
+                    singleTapCount = 0;
+                    togglePrivateMode();
+                    return true;
+                }
+                if (mainHandler != null && pendingSingleTapRunnable != null) {
+                    mainHandler.postDelayed(pendingSingleTapRunnable, 320);
                 }
                 return true;
             }
@@ -330,21 +356,8 @@ public class MainActivity extends AppCompatActivity {
                     
                 case MotionEvent.ACTION_POINTER_DOWN:
                     if (pointerCount == 2) {
-                        long now = System.currentTimeMillis();
-                        if (now - lastTwoFingerDownTime < MULTI_TAP_TIMEOUT) {
-                            twoFingerTapCount++;
-                        } else {
-                            twoFingerTapCount = 1;
-                        }
-                        lastTwoFingerDownTime = now;
-                        
-                        if (twoFingerTapCount == 3) {
-                            togglePrivateMode();
-                            twoFingerTapCount = 0;
-                        }
-                        
                         isZoomingOrPanning = true;
-                        isAdjustingMode = false; // Cancel single finger
+                        isAdjustingMode = false;
                         startX = (event.getX(0) + event.getX(1)) / 2;
                         startY = (event.getY(0) + event.getY(1)) / 2;
                     }
@@ -676,8 +689,8 @@ public class MainActivity extends AppCompatActivity {
             if (jsonArray.length() == 0) {
                 TextView empty = new TextView(this);
                 empty.setText(R.string.history_empty);
-                empty.setTextColor(Color.GRAY);
-                empty.setPadding(0, 20, 0, 20);
+                empty.setTextColor(Color.parseColor("#757575"));
+                empty.setPadding(0, 16, 0, 16);
                 empty.setGravity(Gravity.CENTER);
                 historyContainer.addView(empty);
                 return;
@@ -703,9 +716,9 @@ public class MainActivity extends AppCompatActivity {
 
                 TextView tv = new TextView(this);
                 tv.setText(displayText);
-                tv.setTextColor(Color.WHITE);
-                tv.setTextSize(14f);
-                tv.setPadding(16, 24, 16, 24);
+                tv.setTextColor(Color.parseColor("#1A1A1A"));
+                tv.setTextSize(13f);
+                tv.setPadding(12, 16, 12, 16);
                 tv.setBackgroundResource(android.R.drawable.list_selector_background);
                 tv.setMaxLines(1);
                 tv.setEllipsize(android.text.TextUtils.TruncateAt.MIDDLE);
@@ -714,12 +727,11 @@ public class MainActivity extends AppCompatActivity {
 
                 historyContainer.addView(tv);
 
-                // Divider
                 if (i < jsonArray.length() - 1) {
                     View divider = new View(this);
                     divider.setLayoutParams(new LinearLayout.LayoutParams(
                             LinearLayout.LayoutParams.MATCH_PARENT, 1));
-                    divider.setBackgroundColor(Color.parseColor("#44FFFFFF"));
+                    divider.setBackgroundColor(Color.parseColor("#DDDDDD"));
                     historyContainer.addView(divider);
                 }
             }
@@ -762,6 +774,9 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void saveAndLoad(String uri) {
+        if (configPanel != null) {
+            configPanel.setVisibility(View.GONE);
+        }
         // Update playlist index if loading manually
         if (playlist.contains(uri)) {
             currentPlaylistIndex = playlist.indexOf(uri);
