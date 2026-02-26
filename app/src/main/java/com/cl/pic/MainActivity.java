@@ -98,13 +98,12 @@ public class MainActivity extends AppCompatActivity {
     
 
     
-    // Single-tap 5 times for privacy mode
-    private long lastSingleTapTime = 0;
-    private int singleTapCount = 0;
-    private static final long MULTI_TAP_TIMEOUT = 500;
+    // Tap handling
+    // Right half: single-tap 5 times within PRIVACY_TAP_INTERVAL to toggle privacy mode
+    private static final long PRIVACY_TAP_INTERVAL = 500;
     private static final int PRIVACY_TAP_COUNT = 5;
-    private Handler mainHandler;
-    private Runnable pendingSingleTapRunnable;
+    private long lastPrivacyTapTime = 0;
+    private int privacyTapCount = 0;
 
     // Playlist State
     private List<String> playlist = new ArrayList<>();
@@ -186,13 +185,6 @@ public class MainActivity extends AppCompatActivity {
         // Apply initial brightness
         applyBrightness(isMode2 ? mode2Level : mode1Level);
         
-        mainHandler = new Handler(Looper.getMainLooper());
-        pendingSingleTapRunnable = () -> {
-            if (singleTapCount == 1) {
-                toggleMode();
-            }
-            singleTapCount = 0;
-        };
         setupGestures();
         hideSystemUI();
         
@@ -254,32 +246,38 @@ public class MainActivity extends AppCompatActivity {
         gestureDetector = new GestureDetector(this, new GestureDetector.SimpleOnGestureListener() {
             @Override
             public boolean onDoubleTap(@NonNull MotionEvent e) {
-                toggleConfig();
-                return true;
+                int width = rootLayout != null ? rootLayout.getWidth() : screenWidth;
+                float x = e.getX();
+                if (width <= 0 || x < width / 2f) {
+                    toggleConfig();
+                    return true;
+                }
+                return false;
             }
 
             @Override
             public boolean onSingleTapConfirmed(@NonNull MotionEvent e) {
-                if (configPanel != null && configPanel.getVisibility() == View.VISIBLE) {
-                    toggleConfig();
-                    return true;
-                }
-                long now = System.currentTimeMillis();
-                if (mainHandler != null && pendingSingleTapRunnable != null) {
-                    mainHandler.removeCallbacks(pendingSingleTapRunnable);
-                }
-                if (now - lastSingleTapTime > MULTI_TAP_TIMEOUT) {
-                    singleTapCount = 0;
-                }
-                singleTapCount++;
-                lastSingleTapTime = now;
-                if (singleTapCount >= PRIVACY_TAP_COUNT) {
-                    singleTapCount = 0;
-                    togglePrivateMode();
-                    return true;
-                }
-                if (mainHandler != null && pendingSingleTapRunnable != null) {
-                    mainHandler.postDelayed(pendingSingleTapRunnable, 320);
+                int width = rootLayout != null ? rootLayout.getWidth() : screenWidth;
+                float x = e.getX();
+                boolean isLeft = (width <= 0) || x < width / 2f;
+
+                if (isLeft) {
+                    if (configPanel != null && configPanel.getVisibility() == View.VISIBLE) {
+                        toggleConfig();
+                    } else {
+                        toggleMode();
+                    }
+                } else {
+                    long now = System.currentTimeMillis();
+                    if (now - lastPrivacyTapTime > PRIVACY_TAP_INTERVAL) {
+                        privacyTapCount = 0;
+                    }
+                    privacyTapCount++;
+                    lastPrivacyTapTime = now;
+                    if (privacyTapCount >= PRIVACY_TAP_COUNT) {
+                        privacyTapCount = 0;
+                        togglePrivateMode();
+                    }
                 }
                 return true;
             }
@@ -696,6 +694,8 @@ public class MainActivity extends AppCompatActivity {
                 return;
             }
 
+            int thumbSize = (int) (48 * getResources().getDisplayMetrics().density);
+
             for (int i = 0; i < jsonArray.length(); i++) {
                 final String uri = jsonArray.getString(i);
 
@@ -714,18 +714,69 @@ public class MainActivity extends AppCompatActivity {
                     }
                 } catch (Exception ignored) {}
 
+                // Row: thumbnail + text
+                LinearLayout row = new LinearLayout(this);
+                row.setOrientation(LinearLayout.HORIZONTAL);
+                row.setLayoutParams(new LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT));
+                row.setPadding(12, 8, 12, 8);
+                row.setBackgroundResource(android.R.drawable.list_selector_background);
+
+                ImageView thumb = new ImageView(this);
+                LinearLayout.LayoutParams thumbLp = new LinearLayout.LayoutParams(thumbSize, thumbSize);
+                thumbLp.setMarginEnd(12);
+                thumb.setLayoutParams(thumbLp);
+                thumb.setScaleType(ImageView.ScaleType.CENTER_CROP);
+
+                try {
+                    Glide.with(this)
+                            .load(Uri.parse(uri))
+                            .apply(new RequestOptions()
+                                    .centerCrop()
+                                    .override(thumbSize, thumbSize))
+                            .into(thumb);
+                } catch (Exception ignored) {}
+
                 TextView tv = new TextView(this);
+                LinearLayout.LayoutParams tvLp = new LinearLayout.LayoutParams(
+                        0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+                tv.setLayoutParams(tvLp);
                 tv.setText(displayText);
                 tv.setTextColor(Color.parseColor("#1A1A1A"));
                 tv.setTextSize(13f);
-                tv.setPadding(12, 16, 12, 16);
-                tv.setBackgroundResource(android.R.drawable.list_selector_background);
                 tv.setMaxLines(1);
                 tv.setEllipsize(android.text.TextUtils.TruncateAt.MIDDLE);
 
-                tv.setOnClickListener(v -> saveAndLoad(uri));
+                row.addView(thumb);
+                row.addView(tv);
 
-                historyContainer.addView(tv);
+                // Tap to load this image
+                row.setOnClickListener(v -> saveAndLoad(uri));
+
+                // Long press to delete this history entry
+                row.setOnLongClickListener(v -> {
+                    try {
+                        String raw = prefs.getString(key, "[]");
+                        JSONArray arr = new JSONArray(raw);
+                        List<String> list = new ArrayList<>();
+                        for (int idx = 0; idx < arr.length(); idx++) {
+                            String item = arr.getString(idx);
+                            if (!item.equals(uri)) {
+                                list.add(item);
+                            }
+                        }
+                        JSONArray newArr = new JSONArray(list);
+                        prefs.edit().putString(key, newArr.toString()).apply();
+                        Toast.makeText(this, "Removed from history", Toast.LENGTH_SHORT).show();
+                        refreshHistoryUI();
+                    } catch (JSONException ex) {
+                        ex.printStackTrace();
+                    }
+                    return true;
+                });
+
+                historyContainer.addView(row);
 
                 if (i < jsonArray.length() - 1) {
                     View divider = new View(this);
