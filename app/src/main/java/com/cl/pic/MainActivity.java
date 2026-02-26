@@ -290,7 +290,10 @@ public class MainActivity extends AppCompatActivity {
         gestureDetector = new GestureDetector(this, new GestureDetector.SimpleOnGestureListener() {
             @Override
             public boolean onDoubleTap(@NonNull MotionEvent e) {
-                toggleConfig();
+                // Only trigger if double-tap is on right half of the screen
+                if (e.getX() > screenWidth / 2) {
+                    loadNextImage();
+                }
                 return true;
             }
 
@@ -304,34 +307,7 @@ public class MainActivity extends AppCompatActivity {
                 return true;
             }
             
-            @Override
-            public boolean onFling(@NonNull MotionEvent e1, @NonNull MotionEvent e2, float velocityX, float velocityY) {
-                if (configPanel.getVisibility() == View.VISIBLE) {
-                    return false; // Don't handle fling when config is open
-                }
-                
-                float diffX = e2.getX() - e1.getX();
-                float diffY = e2.getY() - e1.getY();
-                
-                // If vertical movement, ignore (handle panning/zooming)
-                if (Math.abs(diffY) > Math.abs(diffX)) {
-                    return false;
-                }
-                
-                // Horizontal swipe
-                if (Math.abs(diffX) > 100) { // Minimum distance
-                    if (diffX > 0) {
-                        // Swipe right -> Previous image
-                        loadPreviousImage();
-                    } else {
-                        // Swipe left -> Next image
-                        loadNextImage();
-                    }
-                    return true;
-                }
-                
-                return false;
-            }
+            // ...existing code...
         });
 
         scaleGestureDetector = new ScaleGestureDetector(this, new ScaleGestureDetector.SimpleOnScaleGestureListener() {
