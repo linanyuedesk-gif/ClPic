@@ -254,7 +254,7 @@ public class MainActivity extends AppCompatActivity {
             public boolean onSingleTapConfirmed(@NonNull MotionEvent e) {
                 int width = rootLayout != null ? rootLayout.getWidth() : screenWidth;
                 float x = e.getX();
-                boolean isLeft = (width <= 0) || x < width / 2f;
+                boolean isLeft = (width > 0) && (x < width / 2f);
 
                 if (isLeft) {
                     if (configPanel != null && configPanel.getVisibility() == View.VISIBLE) {
