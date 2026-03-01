@@ -17,5 +17,6 @@
     <string name="msg_scanning">Scanning device for images...</string>
     <string name="msg_scan_complete">Found %d images on device</string>
     <string name="msg_no_images">No images found on device</string>
-    <string name="instruction">TAP: Toggle Brightness Mode • SLIDE RIGHT: Next • SLIDE LEFT: Prev • 2-FINGER: Zoom/Pan • LONG PRESS CONFIG: Hide Nav Bar • Double TAP: Show Config</string>
+    <string name="instruction">LEFT TAP: Toggle Brightness Mode • RIGHT DOUBLE TAP: Next • 2-FINGER: Zoom/Pan • DOUBLE TAP: Show/Hide Config</string>
+    <string name="privacy_title">Privacy Mode (Pattern 1-4-2-3)</string>
 </resources>

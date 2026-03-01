@@ -124,6 +124,10 @@ public class MainActivity extends AppCompatActivity {
     // Gesture state helpers
     private boolean imageChangedThisGesture = false;
 
+    // Privacy pattern (1,4,2,3) -> indices 0,3,1,2
+    private static final int[] PRIVACY_PATTERN = {0, 3, 1, 2};
+    private int privacyPatternIndex = 0;
+
     private final ActivityResultLauncher<Intent> filePickerLauncher =
             registerForActivityResult(new ActivityResultContracts.StartActivityForResult(), result -> {
                 if (result.getResultCode() == Activity.RESULT_OK && result.getData() != null) {
@@ -180,10 +184,56 @@ public class MainActivity extends AppCompatActivity {
         mode1Level = prefs.getFloat("mode1_level", 0.8f);
         mode2Level = prefs.getFloat("mode2_level", 0.2f);
         isMode2 = prefs.getBoolean("is_mode2", false);
-        isPrivateMode = prefs.getBoolean(KEY_IS_PRIVATE_MODE, false);
+        // Always start in public mode on new launch
+        isPrivateMode = false;
+        prefs.edit().putBoolean(KEY_IS_PRIVATE_MODE, false).apply();
         
         // Apply initial brightness
         applyBrightness(isMode2 ? mode2Level : mode1Level);
+
+        // Privacy pattern buttons (graphical password 1-4-2-3)
+        View btnPattern1 = findViewById(R.id.btnPattern1);
+        View btnPattern2 = findViewById(R.id.btnPattern2);
+        View btnPattern3 = findViewById(R.id.btnPattern3);
+        View btnPattern4 = findViewById(R.id.btnPattern4);
+
+        View.OnClickListener patternClickListener = v -> {
+            if (v == null) return;
+
+            int index;
+            int id = v.getId();
+            if (id == R.id.btnPattern1) {
+                index = 0;
+            } else if (id == R.id.btnPattern2) {
+                index = 1;
+            } else if (id == R.id.btnPattern3) {
+                index = 2;
+            } else if (id == R.id.btnPattern4) {
+                index = 3;
+            } else {
+                return;
+            }
+
+            if (PRIVACY_PATTERN[privacyPatternIndex] == index) {
+                privacyPatternIndex++;
+                if (privacyPatternIndex == PRIVACY_PATTERN.length) {
+                    // Pattern complete -> toggle private/public mode
+                    privacyPatternIndex = 0;
+                    togglePrivateMode();
+                }
+            } else {
+                // Reset and allow immediate restart if this matches first step
+                privacyPatternIndex = 0;
+                if (PRIVACY_PATTERN[0] == index) {
+                    privacyPatternIndex = 1;
+                }
+            }
+        };
+
+        if (btnPattern1 != null) btnPattern1.setOnClickListener(patternClickListener);
+        if (btnPattern2 != null) btnPattern2.setOnClickListener(patternClickListener);
+        if (btnPattern3 != null) btnPattern3.setOnClickListener(patternClickListener);
+        if (btnPattern4 != null) btnPattern4.setOnClickListener(patternClickListener);
         
         setupGestures();
         hideSystemUI();
@@ -274,17 +324,6 @@ public class MainActivity extends AppCompatActivity {
                         toggleConfig();
                     } else {
                         toggleMode();
-                    }
-                } else {
-                    long now = System.currentTimeMillis();
-                    if (now - lastPrivacyTapTime > PRIVACY_TAP_INTERVAL) {
-                        privacyTapCount = 0;
-                    }
-                    privacyTapCount++;
-                    lastPrivacyTapTime = now;
-                    if (privacyTapCount >= PRIVACY_TAP_COUNT) {
-                        privacyTapCount = 0;
-                        togglePrivateMode();
                     }
                 }
                 return true;
@@ -657,9 +696,11 @@ public class MainActivity extends AppCompatActivity {
         if (configPanel.getVisibility() == View.VISIBLE) {
             configPanel.setVisibility(View.GONE);
             hideSystemUI();
+            privacyPatternIndex = 0;
         } else {
             refreshHistoryUI();
             configPanel.setVisibility(View.VISIBLE);
+            privacyPatternIndex = 0;
         }
     }
 
