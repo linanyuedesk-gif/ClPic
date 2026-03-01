@@ -248,11 +248,17 @@ public class MainActivity extends AppCompatActivity {
             public boolean onDoubleTap(@NonNull MotionEvent e) {
                 int width = rootLayout != null ? rootLayout.getWidth() : screenWidth;
                 float x = e.getX();
-                if (width <= 0 || x < width / 2f) {
-                    toggleConfig();
-                    return true;
+                if (width <= 0) {
+                    width = screenWidth;
                 }
-                return false;
+                if (x < width / 2f) {
+                    toggleConfig();
+                } else {
+                    // Right half double-tap: switch to next image in history/playlist
+                    imageChangedThisGesture = true;
+                    loadNextImage();
+                }
+                return true;
             }
 
             @Override
@@ -284,28 +290,7 @@ public class MainActivity extends AppCompatActivity {
             
             @Override
             public boolean onFling(@NonNull MotionEvent e1, @NonNull MotionEvent e2, float velocityX, float velocityY) {
-                float diffX = e2.getX() - e1.getX();
-                float diffY = e2.getY() - e1.getY();
-                
-                // If vertical movement, ignore (handle panning/zooming)
-                if (Math.abs(diffY) > Math.abs(diffX)) {
-                    return false;
-                }
-                
-                // Horizontal swipe
-                if (Math.abs(diffX) > 100) { // Minimum distance
-                    if (diffX > 0) {
-                        // Swipe right -> Previous image
-                        imageChangedThisGesture = true;
-                        loadPreviousImage();
-                    } else {
-                        // Swipe left -> Next image
-                        imageChangedThisGesture = true;
-                        loadNextImage();
-                    }
-                    return true;
-                }
-                
+                // Disable horizontal fling navigation between images
                 return false;
             }
         });
@@ -314,6 +299,9 @@ public class MainActivity extends AppCompatActivity {
             @Override
             public boolean onScale(ScaleGestureDetector detector) {
                 float scaleFactor = detector.getScaleFactor();
+
+                // Smooth zoom: limit per-step scale factor to avoid jitter
+                scaleFactor = Math.max(0.7f, Math.min(scaleFactor, 1.3f));
 
                 float[] values = new float[9];
                 currentMatrix.getValues(values);
@@ -695,95 +683,70 @@ public class MainActivity extends AppCompatActivity {
             }
 
             int thumbSize = (int) (48 * getResources().getDisplayMetrics().density);
+            int spacing = (int) (4 * getResources().getDisplayMetrics().density);
+            int columns = 4;
+            LinearLayout currentRow = null;
 
             for (int i = 0; i < jsonArray.length(); i++) {
                 final String uri = jsonArray.getString(i);
 
-                // Format display text (filename or short url)
-                String displayText = uri;
-                try {
-                    Uri u = Uri.parse(uri);
-                    if (u.getScheme() != null && u.getScheme().startsWith("content")) {
-                        // Try to get last segment for content URIs
-                        String path = u.getLastPathSegment();
-                        if (path != null) {
-                            int split = path.lastIndexOf(':');
-                            if (split > -1) path = path.substring(split + 1);
-                            displayText = "Local Image: ..." + path;
-                        }
+                // Create new horizontal row for every N thumbnails
+                if (i % columns == 0) {
+                    currentRow = new LinearLayout(this);
+                    currentRow.setOrientation(LinearLayout.HORIZONTAL);
+                    currentRow.setLayoutParams(new LinearLayout.LayoutParams(
+                            LinearLayout.LayoutParams.MATCH_PARENT,
+                            LinearLayout.LayoutParams.WRAP_CONTENT));
+                    currentRow.setPadding(0, i == 0 ? 0 : spacing, 0, 0);
+                    historyContainer.addView(currentRow);
+                }
+
+                if (currentRow != null) {
+                    ImageView thumb = new ImageView(this);
+                    LinearLayout.LayoutParams thumbLp = new LinearLayout.LayoutParams(thumbSize, thumbSize);
+                    // No right margin on last column to keep grid tight
+                    if (i % columns != columns - 1) {
+                        thumbLp.setMarginEnd(spacing);
                     }
-                } catch (Exception ignored) {}
+                    thumb.setLayoutParams(thumbLp);
+                    thumb.setScaleType(ImageView.ScaleType.CENTER_CROP);
+                    thumb.setBackgroundResource(android.R.drawable.list_selector_background);
 
-                // Row: thumbnail + text
-                LinearLayout row = new LinearLayout(this);
-                row.setOrientation(LinearLayout.HORIZONTAL);
-                row.setLayoutParams(new LinearLayout.LayoutParams(
-                        LinearLayout.LayoutParams.MATCH_PARENT,
-                        LinearLayout.LayoutParams.WRAP_CONTENT));
-                row.setPadding(12, 8, 12, 8);
-                row.setBackgroundResource(android.R.drawable.list_selector_background);
-
-                ImageView thumb = new ImageView(this);
-                LinearLayout.LayoutParams thumbLp = new LinearLayout.LayoutParams(thumbSize, thumbSize);
-                thumbLp.setMarginEnd(12);
-                thumb.setLayoutParams(thumbLp);
-                thumb.setScaleType(ImageView.ScaleType.CENTER_CROP);
-
-                try {
-                    Glide.with(this)
-                            .load(Uri.parse(uri))
-                            .apply(new RequestOptions()
-                                    .centerCrop()
-                                    .override(thumbSize, thumbSize))
-                            .into(thumb);
-                } catch (Exception ignored) {}
-
-                TextView tv = new TextView(this);
-                LinearLayout.LayoutParams tvLp = new LinearLayout.LayoutParams(
-                        0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
-                tv.setLayoutParams(tvLp);
-                tv.setText(displayText);
-                tv.setTextColor(Color.parseColor("#1A1A1A"));
-                tv.setTextSize(13f);
-                tv.setMaxLines(1);
-                tv.setEllipsize(android.text.TextUtils.TruncateAt.MIDDLE);
-
-                row.addView(thumb);
-                row.addView(tv);
-
-                // Tap to load this image
-                row.setOnClickListener(v -> saveAndLoad(uri));
-
-                // Long press to delete this history entry
-                row.setOnLongClickListener(v -> {
                     try {
-                        String raw = prefs.getString(key, "[]");
-                        JSONArray arr = new JSONArray(raw);
-                        List<String> list = new ArrayList<>();
-                        for (int idx = 0; idx < arr.length(); idx++) {
-                            String item = arr.getString(idx);
-                            if (!item.equals(uri)) {
-                                list.add(item);
+                        Glide.with(this)
+                                .load(Uri.parse(uri))
+                                .apply(new RequestOptions()
+                                        .centerCrop()
+                                        .override(thumbSize, thumbSize))
+                                .into(thumb);
+                    } catch (Exception ignored) {}
+
+                    // Tap to load this image
+                    thumb.setOnClickListener(v -> saveAndLoad(uri));
+
+                    // Long press to delete this history entry
+                    thumb.setOnLongClickListener(v -> {
+                        try {
+                            String raw = prefs.getString(key, "[]");
+                            JSONArray arr = new JSONArray(raw);
+                            List<String> list = new ArrayList<>();
+                            for (int idx = 0; idx < arr.length(); idx++) {
+                                String item = arr.getString(idx);
+                                if (!item.equals(uri)) {
+                                    list.add(item);
+                                }
                             }
+                            JSONArray newArr = new JSONArray(list);
+                            prefs.edit().putString(key, newArr.toString()).apply();
+                            Toast.makeText(this, "Removed from history", Toast.LENGTH_SHORT).show();
+                            refreshHistoryUI();
+                        } catch (JSONException ex) {
+                            ex.printStackTrace();
                         }
-                        JSONArray newArr = new JSONArray(list);
-                        prefs.edit().putString(key, newArr.toString()).apply();
-                        Toast.makeText(this, "Removed from history", Toast.LENGTH_SHORT).show();
-                        refreshHistoryUI();
-                    } catch (JSONException ex) {
-                        ex.printStackTrace();
-                    }
-                    return true;
-                });
+                        return true;
+                    });
 
-                historyContainer.addView(row);
-
-                if (i < jsonArray.length() - 1) {
-                    View divider = new View(this);
-                    divider.setLayoutParams(new LinearLayout.LayoutParams(
-                            LinearLayout.LayoutParams.MATCH_PARENT, 1));
-                    divider.setBackgroundColor(Color.parseColor("#DDDDDD"));
-                    historyContainer.addView(divider);
+                    currentRow.addView(thumb);
                 }
             }
         } catch (JSONException e) {
