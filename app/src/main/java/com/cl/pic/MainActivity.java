@@ -112,7 +112,7 @@ public class MainActivity extends AppCompatActivity {
     private boolean isPrivateMode = false;
     
     // Geometry State
-    private int screenWidth;
+    private int screenWidth; 
     private int screenHeight;
     private Matrix currentMatrix = new Matrix();
     private String currentUriString;
