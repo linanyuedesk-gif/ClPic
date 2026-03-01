@@ -243,76 +243,26 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void setupGestures() {
+        // Tap gestures
         gestureDetector = new GestureDetector(this, new GestureDetector.SimpleOnGestureListener() {
             @Override
             public boolean onDoubleTap(@NonNull MotionEvent e) {
-                toggleConfig();
-                return true;
-            }
-
-            @Override
-            public boolean onSingleTapConfirmed(@NonNull MotionEvent e) {
                 int width = rootLayout != null ? rootLayout.getWidth() : screenWidth;
+                if (width <= 0) {
+                    width = screenWidth;
+                }
                 float x = e.getX();
-                boolean isLeft = (width > 0) && (x < width / 2f);
-
-                if (isLeft) {
-                    if (configPanel != null && configPanel.getVisibility() == View.VISIBLE) {
-                        toggleConfig();
-                    } else {
-                        toggleMode();
-                    }
+                if (x < width / 2f) {
+                    // Left half: open/close config panel
+                    toggleConfig();
                 } else {
-                    long now = System.currentTimeMillis();
-                    if (now - lastPrivacyTapTime > PRIVACY_TAP_INTERVAL) {
-                        privacyTapCount = 0;
-                    }
-                    privacyTapCount++;
-                    lastPrivacyTapTime = now;
-                    if (privacyTapCount >= PRIVACY_TAP_COUNT) {
-                        privacyTapCount = 0;
-                        togglePrivateMode();
-                    }
+                    // Right half: next image
+                    imageChangedThisGesture = true;
+                    loadNextImage();
                 }
                 return true;
             }
-            
-            @Override
-            public boolean onFling(@NonNull MotionEvent e1, @NonNull MotionEvent e2, float velocityX, float velocityY) {
-                if (configPanel.getVisibility() == View.VISIBLE) {
-                    return false; // Don't handle fling when config is open
-                }
-                
-                float diffX = e2.getX() - e1.getX();
-                float diffY = e2.getY() - e1.getY();
-                
-                // If vertical movement, ignore (handle panning/zooming)
-                if (Math.abs(diffY) > Math.abs(diffX)) {
-                    return false;
-                }
-                
-                // Horizontal swipe
-                if (Math.abs(diffX) > 100) { // Minimum distance
-                    if (diffX > 0) {
-                        // Swipe right -> Previous image
-                        loadPreviousImage();
-                    } else {
-                        // Swipe left -> Next image
-                        loadNextImage();
-                    }
-                    return true;
-                }
-                
-                return false;
-            }
-        });
 
-        gestureDetector = new GestureDetector(this, new GestureDetector.SimpleOnGestureListener() {
-            @Override
-            public boolean onDoubleTap(@NonNull MotionEvent e) {
-                toggleConfig();
-                return true;
-            }
             @Override
             public boolean onSingleTapConfirmed(@NonNull MotionEvent e) {
                 int width = rootLayout != null ? rootLayout.getWidth() : screenWidth;
@@ -339,41 +289,89 @@ public class MainActivity extends AppCompatActivity {
                 }
                 return true;
             }
+
             @Override
             public boolean onFling(@NonNull MotionEvent e1, @NonNull MotionEvent e2, float velocityX, float velocityY) {
-                if (configPanel.getVisibility() == View.VISIBLE) {
-                    return false; // Don't handle fling when config is open
-                }
-                float diffX = e2.getX() - e1.getX();
-                float diffY = e2.getY() - e1.getY();
-                // If vertical movement, ignore (handle panning/zooming)
-                if (Math.abs(diffY) > Math.abs(diffX)) {
-                    return false;
-                }
-                // Horizontal swipe
-                if (Math.abs(diffX) > 100) { // Minimum distance
-                    if (diffX > 0) {
-                        // Swipe right -> Previous image
-                        loadPreviousImage();
-                    } else {
-                        // Swipe left -> Next image
-                        loadNextImage();
-                    }
-                    return true;
-                }
+                // Disable image navigation by fling (左右快滑)
                 return false;
             }
         });
+
+        // Pinch zoom
+        scaleGestureDetector = new ScaleGestureDetector(this, new ScaleGestureDetector.SimpleOnScaleGestureListener() {
+            @Override
+            public boolean onScale(ScaleGestureDetector detector) {
+                float scaleFactor = detector.getScaleFactor();
+
+                // Smooth zoom: clamp per-step zoom factor
+                scaleFactor = Math.max(0.7f, Math.min(scaleFactor, 1.3f));
+
+                float[] values = new float[9];
+                currentMatrix.getValues(values);
+                float currentScale = values[Matrix.MSCALE_X];
+
+                float minScale = baseScale;
+                float maxScale = baseScale * MAX_SCALE_MULTIPLIER;
+                float targetScale = currentScale * scaleFactor;
+
+                if (targetScale < minScale) {
+                    scaleFactor = minScale / currentScale;
+                } else if (targetScale > maxScale) {
+                    scaleFactor = maxScale / currentScale;
+                }
+
+                currentMatrix.postScale(scaleFactor, scaleFactor, detector.getFocusX(), detector.getFocusY());
+                checkBoundsAndFix();
+                imageView.setImageMatrix(currentMatrix);
+                return true;
+            }
+        });
+
+        // Brightness gesture + panning
+        rootLayout.setOnTouchListener((v, event) -> {
+            scaleGestureDetector.onTouchEvent(event);
+            gestureDetector.onTouchEvent(event);
+
+            int action = event.getActionMasked();
+            int pointerCount = event.getPointerCount();
+
+            switch (action) {
+                case MotionEvent.ACTION_DOWN:
+                    startX = event.getX();
+                    startY = event.getY();
+                    isAdjustingMode = false;
+                    isZoomingOrPanning = false;
+                    imageChangedThisGesture = false;
+                    break;
+
+                case MotionEvent.ACTION_POINTER_DOWN:
+                    if (pointerCount == 2) {
                         isZoomingOrPanning = true;
                         isAdjustingMode = false;
-                    } 
-                    
+                        startX = (event.getX(0) + event.getX(1)) / 2;
+                        startY = (event.getY(0) + event.getY(1)) / 2;
+                    }
+                    break;
+
+                case MotionEvent.ACTION_POINTER_UP:
+                    // If we were zooming, keep isZoomingOrPanning true so we don't switch to brightness
+                    if (pointerCount - 1 < 2) {
+                        // Dropping to 1 finger
+                    }
+                    break;
+
+                case MotionEvent.ACTION_MOVE:
+                    if (scaleGestureDetector.isInProgress()) {
+                        isZoomingOrPanning = true;
+                        isAdjustingMode = false;
+                    }
+
                     if (pointerCount == 1) {
                         if (isZoomingOrPanning) {
                             // Ignore single finger moves if we were/are zooming
-                            break; 
+                            break;
                         }
-                        
+
                         if (!isAdjustingMode) {
                             float dx = event.getX() - startX;
                             float dy = event.getY() - startY;
@@ -398,7 +396,7 @@ public class MainActivity extends AppCompatActivity {
                                 showBrightnessIndicator();
                             }
                         }
-                        
+
                         if (isAdjustingMode) {
                             if (!isMode2) {
                                 // Mode 1 (Horizontal)
@@ -409,8 +407,7 @@ public class MainActivity extends AppCompatActivity {
                             } else {
                                 // Mode 2 (Vertical)
                                 // Up is negative deltaY, but we want Up -> Brighter (Higher Level)
-                                // So we subtract deltaY (or use -deltaY)
-                                float deltaY = startY - event.getY(); 
+                                float deltaY = startY - event.getY();
                                 float change = deltaY / rootLayout.getHeight();
                                 mode2Level = clamp(startLevel + change);
                                 applyBrightness(mode2Level);
@@ -424,11 +421,11 @@ public class MainActivity extends AppCompatActivity {
                         float currY = (event.getY(0) + event.getY(1)) / 2;
                         float dx = currX - startX;
                         float dy = currY - startY;
-                        
+
                         currentMatrix.postTranslate(dx, dy);
                         checkBoundsAndFix();
                         imageView.setImageMatrix(currentMatrix);
-                        
+
                         startX = currX;
                         startY = currY;
                     }
@@ -687,95 +684,69 @@ public class MainActivity extends AppCompatActivity {
             }
 
             int thumbSize = (int) (48 * getResources().getDisplayMetrics().density);
+            int spacing = (int) (4 * getResources().getDisplayMetrics().density);
+            int columns = 4;
+            LinearLayout currentRow = null;
 
             for (int i = 0; i < jsonArray.length(); i++) {
                 final String uri = jsonArray.getString(i);
 
-                // Format display text (filename or short url)
-                String displayText = uri;
-                try {
-                    Uri u = Uri.parse(uri);
-                    if (u.getScheme() != null && u.getScheme().startsWith("content")) {
-                        // Try to get last segment for content URIs
-                        String path = u.getLastPathSegment();
-                        if (path != null) {
-                            int split = path.lastIndexOf(':');
-                            if (split > -1) path = path.substring(split + 1);
-                            displayText = "Local Image: ..." + path;
-                        }
+                // New row every N thumbnails
+                if (i % columns == 0) {
+                    currentRow = new LinearLayout(this);
+                    currentRow.setOrientation(LinearLayout.HORIZONTAL);
+                    currentRow.setLayoutParams(new LinearLayout.LayoutParams(
+                            LinearLayout.LayoutParams.MATCH_PARENT,
+                            LinearLayout.LayoutParams.WRAP_CONTENT));
+                    currentRow.setPadding(0, i == 0 ? 0 : spacing, 0, 0);
+                    historyContainer.addView(currentRow);
+                }
+
+                if (currentRow != null) {
+                    ImageView thumb = new ImageView(this);
+                    LinearLayout.LayoutParams thumbLp = new LinearLayout.LayoutParams(thumbSize, thumbSize);
+                    if (i % columns != columns - 1) {
+                        thumbLp.setMarginEnd(spacing);
                     }
-                } catch (Exception ignored) {}
+                    thumb.setLayoutParams(thumbLp);
+                    thumb.setScaleType(ImageView.ScaleType.CENTER_CROP);
+                    thumb.setBackgroundResource(android.R.drawable.list_selector_background);
 
-                // Row: thumbnail + text
-                LinearLayout row = new LinearLayout(this);
-                row.setOrientation(LinearLayout.HORIZONTAL);
-                row.setLayoutParams(new LinearLayout.LayoutParams(
-                        LinearLayout.LayoutParams.MATCH_PARENT,
-                        LinearLayout.LayoutParams.WRAP_CONTENT));
-                row.setPadding(12, 8, 12, 8);
-                row.setBackgroundResource(android.R.drawable.list_selector_background);
-
-                ImageView thumb = new ImageView(this);
-                LinearLayout.LayoutParams thumbLp = new LinearLayout.LayoutParams(thumbSize, thumbSize);
-                thumbLp.setMarginEnd(12);
-                thumb.setLayoutParams(thumbLp);
-                thumb.setScaleType(ImageView.ScaleType.CENTER_CROP);
-
-                try {
-                    Glide.with(this)
-                            .load(Uri.parse(uri))
-                            .apply(new RequestOptions()
-                                    .centerCrop()
-                                    .override(thumbSize, thumbSize))
-                            .into(thumb);
-                } catch (Exception ignored) {}
-
-                TextView tv = new TextView(this);
-                LinearLayout.LayoutParams tvLp = new LinearLayout.LayoutParams(
-                        0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
-                tv.setLayoutParams(tvLp);
-                tv.setText(displayText);
-                tv.setTextColor(Color.parseColor("#1A1A1A"));
-                tv.setTextSize(13f);
-                tv.setMaxLines(1);
-                tv.setEllipsize(android.text.TextUtils.TruncateAt.MIDDLE);
-
-                row.addView(thumb);
-                row.addView(tv);
-
-                // Tap to load this image
-                row.setOnClickListener(v -> saveAndLoad(uri));
-
-                // Long press to delete this history entry
-                row.setOnLongClickListener(v -> {
                     try {
-                        String raw = prefs.getString(key, "[]");
-                        JSONArray arr = new JSONArray(raw);
-                        List<String> list = new ArrayList<>();
-                        for (int idx = 0; idx < arr.length(); idx++) {
-                            String item = arr.getString(idx);
-                            if (!item.equals(uri)) {
-                                list.add(item);
+                        Glide.with(this)
+                                .load(Uri.parse(uri))
+                                .apply(new RequestOptions()
+                                        .centerCrop()
+                                        .override(thumbSize, thumbSize))
+                                .into(thumb);
+                    } catch (Exception ignored) {}
+
+                    // Tap to load this image
+                    thumb.setOnClickListener(v -> saveAndLoad(uri));
+
+                    // Long press to delete this history entry
+                    thumb.setOnLongClickListener(v -> {
+                        try {
+                            String raw = prefs.getString(key, "[]");
+                            JSONArray arr = new JSONArray(raw);
+                            List<String> list = new ArrayList<>();
+                            for (int idx = 0; idx < arr.length(); idx++) {
+                                String item = arr.getString(idx);
+                                if (!item.equals(uri)) {
+                                    list.add(item);
+                                }
                             }
+                            JSONArray newArr = new JSONArray(list);
+                            prefs.edit().putString(key, newArr.toString()).apply();
+                            Toast.makeText(this, "Removed from history", Toast.LENGTH_SHORT).show();
+                            refreshHistoryUI();
+                        } catch (JSONException ex) {
+                            ex.printStackTrace();
                         }
-                        JSONArray newArr = new JSONArray(list);
-                        prefs.edit().putString(key, newArr.toString()).apply();
-                        Toast.makeText(this, "Removed from history", Toast.LENGTH_SHORT).show();
-                        refreshHistoryUI();
-                    } catch (JSONException ex) {
-                        ex.printStackTrace();
-                    }
-                    return true;
-                });
+                        return true;
+                    });
 
-                historyContainer.addView(row);
-
-                if (i < jsonArray.length() - 1) {
-                    View divider = new View(this);
-                    divider.setLayoutParams(new LinearLayout.LayoutParams(
-                            LinearLayout.LayoutParams.MATCH_PARENT, 1));
-                    divider.setBackgroundColor(Color.parseColor("#DDDDDD"));
-                    historyContainer.addView(divider);
+                    currentRow.addView(thumb);
                 }
             }
         } catch (JSONException e) {
